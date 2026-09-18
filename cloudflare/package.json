@@ -1,0 +1,15 @@
+{
+  "name": "eason-trading-cloud-monitor",
+  "version": "0.3.18",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 migrations apply eason-trading-monitor --remote",
+    "test": "node --test src/*.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "4.131.2"
+  }
+}

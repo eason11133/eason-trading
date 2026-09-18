@@ -1,0 +1,344 @@
+$ErrorActionPreference = "Stop"
+$TargetVersion = [version]"0.3.18"
+$TargetLabel = "0.3.18"
+$ExpectedZipSha256 = "__ZIP_SHA256__"
+$Downloads = Join-Path $env:USERPROFILE "Downloads"
+$CurrentPointer = Join-Path $Downloads "eason-trading-current.txt"
+$BackupBase = Join-Path $Downloads "eason-trading-backups"
+$NewDir = Join-Path $Downloads "eason-trading-v1-source-v0.3.18"
+$NewRoot = Join-Path $NewDir "eason-trading-v1"
+$InstallId = [guid]::NewGuid().ToString("N")
+$StageDir = Join-Path $Downloads (".eason-trading-v0.3.18-staging-" + $InstallId)
+$StageRoot = Join-Path $StageDir "eason-trading-v1"
+$NpmCache = Join-Path $env:TEMP ("eason-trading-v0318-npm-cache-" + $InstallId)
+
+function Test-PreviousRoot([string]$Root) {
+  return $Root -and
+    (Test-Path (Join-Path $Root "server\src\server.mjs")) -and
+    (Test-Path (Join-Path $Root ".env.local"))
+}
+function Test-NewRoot([string]$Root) {
+  return $Root -and
+    (Test-Path (Join-Path $Root "server\src\server.mjs")) -and
+    (Test-Path (Join-Path $Root "scripts\start-backend.ps1"))
+}
+function Read-Pointer {
+  if (Test-Path $CurrentPointer) {
+    $x = (Get-Content $CurrentPointer -Raw).Trim()
+    if ($x -and (Test-Path (Join-Path $x "server\src\server.mjs"))) { return $x }
+  }
+  return $null
+}
+function Resolve-PreviousRoot {
+  $active = Read-Pointer
+  if ($active -and (Test-PreviousRoot $active)) { return $active }
+  $rows = Get-ChildItem -Path $Downloads -Directory -Filter "eason-trading-v1-source-v*" -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.Name -match '^eason-trading-v1-source-v(\d+\.\d+\.\d+)(?:-.*)?$') {
+      [pscustomobject]@{ Root=(Join-Path $_.FullName "eason-trading-v1"); Version=[version]$Matches[1] }
+    }
+  } | Where-Object { $_.Version -lt $TargetVersion -and (Test-PreviousRoot $_.Root) } | Sort-Object Version -Descending
+  $candidate=$rows|Select-Object -First 1
+  if($candidate){return $candidate.Root}
+  return $null
+}
+function FileHashOrNull([string]$Path) {
+  if (Test-Path $Path) { return (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLowerInvariant() }
+  return $null
+}
+function Get-EnvValue([string]$File,[string]$Name) {
+  if (-not (Test-Path $File)) { return $null }
+  foreach ($line in Get-Content $File) {
+    $x = $line.Trim()
+    if (-not $x -or $x.StartsWith("#")) { continue }
+    $parts = $x.Split("=",2)
+    if ($parts.Count -eq 2 -and $parts[0].Trim().Trim([char]0xFEFF) -eq $Name) { return $parts[1].Trim() }
+  }
+  return $null
+}
+function Stop-EasonProcesses {
+  foreach ($port in 8787,8081) {
+    $listeners = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+    foreach ($listener in $listeners) { Stop-Process -Id $listener.OwningProcess -Force -ErrorAction SilentlyContinue }
+  }
+  Start-Sleep -Milliseconds 800
+}
+function Restart-PreviousInstall([string]$Root) {
+  if (-not (Test-PreviousRoot $Root)) { return }
+  $script = Join-Path $Root "scripts\start-backend.ps1"
+  if (-not (Test-Path $script)) { $script = Join-Path $Root "scripts\start-web.ps1" }
+  try {
+    Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile","-ExecutionPolicy","Bypass","-File",$script) -WorkingDirectory $Root | Out-Null
+    Write-Host "Previous Eason Trading install restarted." -ForegroundColor Yellow
+  } catch {
+    Write-Host "Previous install files and active pointer are intact, but automatic restart failed." -ForegroundColor Yellow
+  }
+}
+function Find-VerifiedSourceZip {
+  $candidates = Get-ChildItem -Path $Downloads -Filter "eason-trading-v1-source-v0.3.18*.zip" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+  foreach ($candidate in $candidates) {
+    $hash = (Get-FileHash -Algorithm SHA256 -Path $candidate.FullName).Hash.ToLowerInvariant()
+    if ($hash -eq $ExpectedZipSha256) { return $candidate }
+  }
+  throw "Exact v0.3.18 FINAL source ZIP with SHA256 $ExpectedZipSha256 was not found in Downloads."
+}
+function Set-AuditEnvironment([bool]$Enabled) {
+  if ($Enabled) { $env:EASON_AUDIT_MODE = "1" }
+  else { Remove-Item Env:EASON_AUDIT_MODE -ErrorAction SilentlyContinue }
+}
+function Start-NewInstallAndVerify([string]$Root,[bool]$AuditMode) {
+  $envFile = Join-Path $Root ".env.local"
+  $apiKey = Get-EnvValue $envFile "TRADING_API_KEY"
+  if (-not $apiKey) { throw "TRADING_API_KEY missing before startup smoke." }
+  Set-AuditEnvironment $AuditMode
+  $launcherOutput = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "scripts\start-backend.ps1") -NoPair 2>&1)
+  $launcherExit = $LASTEXITCODE
+  foreach ($line in $launcherOutput) { Write-Host ([string]$line) }
+  $health = $null
+  for ($i=0; $i -lt 120; $i++) {
+    try { $health = Invoke-RestMethod "http://127.0.0.1:8787/health" -Headers @{"x-api-key"=$apiKey} -TimeoutSec 3 } catch { $health = $null }
+    if ($health -and $health.version -eq "0.3.18" -and $health.marketDataVerified -eq $true -and [bool]$health.auditMode -eq $AuditMode) {
+      if ($launcherExit -ne 0) { Write-Host "Launcher returned non-zero after backend became healthy; continuing with verified health state." -ForegroundColor Yellow }
+      return $health
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  $detail = if ($health) { "version=$($health.version), marketDataVerified=$($health.marketDataVerified), auditMode=$($health.auditMode), quotesReady=$($health.quotesReady), marketDataError=$($health.marketDataError)" } else { "health unavailable" }
+  if ($launcherExit -ne 0) { throw "v0.3.18 backend launcher failed (exit=$launcherExit); $detail" }
+  throw "v0.3.18 startup smoke failed: $detail"
+}
+function Invoke-CloudSyncDetailed([string]$ApiKey,[bool]$ApplyCommands) {
+  $url = "http://127.0.0.1:8787/v1/cloud-monitor/sync"
+  if (-not $ApplyCommands) { $url += "?applyCommands=false" }
+  try {
+    return Invoke-RestMethod $url -Method Post -Headers @{"x-api-key"=$ApiKey} -ContentType "application/json" -Body "{}" -TimeoutSec 90
+  } catch {
+    $detail = $_.Exception.Message
+    try {
+      $resp=$_.Exception.Response
+      if($resp){$reader=New-Object System.IO.StreamReader($resp.GetResponseStream());$body=$reader.ReadToEnd();$reader.Close();if($body){$detail=$detail+" | "+$body}}
+    } catch {}
+    throw "Backend to Cloud sync failed: $detail"
+  }
+}
+function Get-LedgerFingerprint([string]$Root) {
+  $stateFile = Join-Path $Root "server\data\state.json"
+  if (-not (Test-Path $stateFile)) { throw "Local state.json missing before Ledger fingerprint." }
+  $value = & node (Join-Path $Root "scripts\ledger-fingerprint.mjs") $stateFile
+  if ($LASTEXITCODE -ne 0 -or -not $value) { throw "Could not fingerprint local Ledger truth." }
+  return ([string]$value).Trim()
+}
+function Invoke-ProductionAudit([string]$Root) {
+  Write-Host "Running live production audit before active-pointer cutover..." -ForegroundColor Cyan
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "scripts\audit-production.ps1")
+  if ($LASTEXITCODE -ne 0) { throw "Live production audit failed. Active pointer will remain on the previous version." }
+}
+function Install-Dependencies([string]$Root) {
+  New-Item -ItemType Directory -Force -Path $NpmCache | Out-Null
+  $oldRegistry=$env:npm_config_registry; $oldCache=$env:npm_config_cache; $oldPreferOnline=$env:npm_config_prefer_online
+  try {
+    $env:npm_config_registry="https://registry.npmjs.org/"
+    $env:npm_config_cache=$NpmCache
+    $env:npm_config_prefer_online="true"
+    Push-Location $Root
+    try {
+      npm install --registry=https://registry.npmjs.org/ --cache $NpmCache --prefer-online --no-audit --no-fund
+      if ($LASTEXITCODE -ne 0) { throw "root npm install failed" }
+    } finally { Pop-Location }
+    Push-Location (Join-Path $Root "cloudflare")
+    try {
+      npm install --registry=https://registry.npmjs.org/ --cache $NpmCache --prefer-online --no-audit --no-fund
+      if ($LASTEXITCODE -ne 0) { throw "cloud npm install failed" }
+    } finally { Pop-Location }
+  } finally {
+    $env:npm_config_registry=$oldRegistry; $env:npm_config_cache=$oldCache; $env:npm_config_prefer_online=$oldPreferOnline
+  }
+}
+function Invoke-SourceContracts([string]$Root) {
+  Push-Location $Root
+  try {
+    $checks=@(
+      "scripts/check-release-contract.mjs",
+      "scripts/check-installer-contract.mjs",
+      "scripts/check-package-clean.mjs",
+      "scripts/check-rollback-merge.mjs",
+      "scripts/check-cloud-module-pair.mjs",
+      "scripts/check-cloudflare-cli-runner.mjs",
+      "scripts/check-cloud-setup-full-sim.mjs",
+      "scripts/check-mobile-tooling-resolution.mjs",
+      "scripts/check-sdk57-mobile-api-regression.mjs",
+      "scripts/check-release-shell-interop.mjs",
+      "scripts/check-production-audit-contract.mjs"
+    )
+    foreach($check in $checks) {
+      & node $check
+      if($LASTEXITCODE -ne 0) { throw "Source contract failed: $check" }
+    }
+    & node --test .\shared\smart-trigger.test.mjs
+    if($LASTEXITCODE -ne 0) { throw "shared smart-trigger tests failed" }
+  } finally { Pop-Location }
+}
+function Test-EasAuthentication {
+  $npx=(Get-Command npx.cmd -ErrorAction SilentlyContinue).Source
+  if(-not $npx){$npx=(Get-Command npx -ErrorAction Stop).Source}
+  Write-Host "Checking pinned EAS CLI 24.3.0 authentication before cutover..." -ForegroundColor Cyan
+  & $npx --yes eas-cli@24.3.0 whoami
+  if($LASTEXITCODE -ne 0){throw "EAS authentication check failed. Log in to EAS before running this updater."}
+}
+
+if (-not (node -v 2>$null)) { throw "Node.js not found. Node 22.13+ is required." }
+$nodeSemver = [version]((node -p "process.versions.node").Trim())
+if ($nodeSemver -lt [version]"22.13.0") { throw "Node.js 22.13+ is required. Found $nodeSemver" }
+
+Write-Host ""
+Write-Host "=== Eason Trading v0.3.18 FINAL production update ===" -ForegroundColor Cyan
+$Zip = Find-VerifiedSourceZip
+$ActualHash = (Get-FileHash -Algorithm SHA256 -Path $Zip.FullName).Hash.ToLowerInvariant()
+$PreviousRoot = Resolve-PreviousRoot
+$StateSource=$null;$EnvSource=$null
+$InitialActive = Read-Pointer
+if (-not $PreviousRoot) { throw "A previous Eason Trading install with .env.local is required for this in-place upgrade." }
+Write-Host ("Previous root: " + $PreviousRoot) -ForegroundColor DarkGray
+
+if (Test-Path $StageDir) { Remove-Item $StageDir -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
+Expand-Archive -Path $Zip.FullName -DestinationPath $StageDir -Force
+if (-not (Test-NewRoot $StageRoot)) { throw "Extracted staging package is incomplete." }
+Set-Location $StageRoot
+node .\scripts\verify-install-source.mjs
+if ($LASTEXITCODE -ne 0) { throw "source verification failed" }
+Invoke-SourceContracts $StageRoot
+
+Write-Host "Installing and verifying dependencies while the current version stays online..." -ForegroundColor Cyan
+Install-Dependencies $StageRoot
+Push-Location $StageRoot
+try {
+  npm --workspace server test
+  if ($LASTEXITCODE -ne 0) { throw "server tests failed" }
+  npm --prefix cloudflare test
+  if ($LASTEXITCODE -ne 0) { throw "cloud tests failed" }
+  node --test .\shared\smart-trigger.test.mjs
+  if ($LASTEXITCODE -ne 0) { throw "shared smart-trigger tests failed" }
+  node .\scripts\verify-install-runtime.mjs --typecheck-only
+  if ($LASTEXITCODE -ne 0) { throw "Expo/TypeScript/Android+iOS bundle verification failed" }
+} finally { Pop-Location }
+Test-EasAuthentication
+Write-Host "All source, server, Cloud, smart-trigger, Expo SDK57, TypeScript and Android/iOS bundle preflight gates passed." -ForegroundColor Green
+
+$ActiveAfterPreflight = Read-Pointer
+if ($InitialActive -and $ActiveAfterPreflight -ne $InitialActive) { throw "Active install changed during preflight. Refusing to promote staging." }
+
+$Backup = $null
+$promoted = $false
+$pointerCutover = $false
+$stopped = $false
+try {
+  Stop-EasonProcesses
+  $stopped = $true
+  $StateSource = Join-Path $PreviousRoot "server\data\state.json"
+  $EnvSource = Join-Path $PreviousRoot ".env.local"
+  if (-not (Test-Path $EnvSource)) { throw "Previous .env.local was not found. Refusing to lose credentials." }
+
+  $Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+  $Backup = Join-Path $BackupBase ($Stamp + "-v0318-final")
+  New-Item -ItemType Directory -Force -Path $Backup | Out-Null
+  if (Test-Path $StateSource) {
+    Copy-Item $StateSource (Join-Path $Backup "state.json") -Force
+    if (Test-Path ($StateSource + ".bak")) { Copy-Item ($StateSource + ".bak") (Join-Path $Backup "state.json.bak") -Force }
+  }
+  Copy-Item $EnvSource (Join-Path $Backup ".env.local") -Force
+  Set-Content (Join-Path $Backup "previous-root.txt") $PreviousRoot -Encoding ascii
+  Set-Content (Join-Path $Backup "installed-root.txt") $NewRoot -Encoding ascii
+  $manifest=[ordered]@{createdAt=(Get-Date).ToString("o");target=$TargetLabel;zipSha256=$ActualHash;previousRoot=$PreviousRoot;installedRoot=$NewRoot;files=[ordered]@{state=FileHashOrNull (Join-Path $Backup "state.json");stateBak=FileHashOrNull (Join-Path $Backup "state.json.bak");env=FileHashOrNull (Join-Path $Backup ".env.local")}}
+  $manifest | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $Backup "backup-manifest.json") -Encoding utf8
+  Write-Host ("Backup: " + $Backup) -ForegroundColor DarkGray
+
+  Copy-Item $EnvSource (Join-Path $StageRoot ".env.local") -Force
+  if (Test-Path $StateSource) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $StageRoot "server\data") | Out-Null
+    Copy-Item $StateSource (Join-Path $StageRoot "server\data\state.json") -Force
+    if (Test-Path ($StateSource + ".bak")) { Copy-Item ($StateSource + ".bak") (Join-Path $StageRoot "server\data\state.json.bak") -Force }
+  }
+  $oldApp = Join-Path $PreviousRoot "mobile\app.json"
+  $stageApp = Join-Path $StageRoot "mobile\app.json"
+  if ((Test-Path $oldApp) -and (Test-Path $stageApp)) {
+    node .\scripts\preserve-upgrade-assets.mjs eas-project-id $oldApp $stageApp
+    if ($LASTEXITCODE -ne 0) { throw "Could not preserve EAS project id." }
+  }
+
+  node .\scripts\verify-install-runtime.mjs --ledger-only
+  if ($LASTEXITCODE -ne 0) { throw "Imported ledger smoke failed" }
+  $marker=[ordered]@{version=$TargetLabel;installedAt=(Get-Date).ToString("o");sourceZipSha256=$ActualHash;backup=$Backup;previousRoot=$PreviousRoot;mobileSdk="57";release="FINAL"}
+  $marker | ConvertTo-Json | Set-Content (Join-Path $StageRoot ".eason-install.json") -Encoding utf8
+
+  Set-Location $Downloads
+  if (Test-Path $NewDir) {
+    if ((Read-Pointer) -eq $NewRoot) { throw "v0.3.18 is already the active install." }
+    Remove-Item $NewDir -Recurse -Force
+  }
+  Move-Item -Path $StageDir -Destination $NewDir
+  if (-not (Test-NewRoot $NewRoot)) { throw "Promoted v0.3.18 root is incomplete." }
+
+  Write-Host "Starting v0.3.18 in AUDIT MODE before pointer cutover..." -ForegroundColor Cyan
+  $health = Start-NewInstallAndVerify $NewRoot $true
+  Write-Host ("Audit backend v" + $health.version + " startup smoke passed; real GPT strategy commands are held.") -ForegroundColor Green
+
+  Write-Host "Applying FINAL D1 migration/Worker and GPT bridge deployment..." -ForegroundColor Cyan
+  Set-Location $NewRoot
+  node .\scripts\setup-cloud-monitor.mjs
+  if ($LASTEXITCODE -ne 0) { throw "Cloudflare deployment failed" }
+
+  Write-Host "Restarting audited v0.3.18 after Cloud deployment..." -ForegroundColor Cyan
+  Stop-EasonProcesses
+  $health = Start-NewInstallAndVerify $NewRoot $true
+  Write-Host ("Audit backend v" + $health.version + " post-deploy restart passed.") -ForegroundColor Green
+
+  $apiKey = Get-EnvValue (Join-Path $NewRoot ".env.local") "TRADING_API_KEY"
+  $cloudSync = Invoke-CloudSyncDetailed $apiKey $false
+  if (-not $cloudSync.ok) { throw "Backend to Cloud command-safe sync returned ok=false after deployment" }
+  Write-Host ("Command-safe Cloud sync passed: armed=" + $cloudSync.sync.localArmed + ", synced=" + $cloudSync.sync.synced + ", devices=" + $cloudSync.devices.count) -ForegroundColor Green
+
+  $ledgerBeforeAudit = Get-LedgerFingerprint $NewRoot
+  Invoke-ProductionAudit $NewRoot
+  $ledgerAfterAudit = Get-LedgerFingerprint $NewRoot
+  if ($ledgerBeforeAudit -ne $ledgerAfterAudit) { throw "Ledger truth changed across the live production audit." }
+
+  Write-Host "Pre-cutover production audit PASS. Restarting once in normal mode..." -ForegroundColor Green
+  Stop-EasonProcesses
+  Set-AuditEnvironment $false
+  $normalHealth = Start-NewInstallAndVerify $NewRoot $false
+  if ([bool]$normalHealth.auditMode) { throw "Normal backend restart unexpectedly remained in audit mode." }
+
+  $safeNormalSync = Invoke-CloudSyncDetailed $apiKey $false
+  if (-not $safeNormalSync.ok) { throw "Normal-mode command-safe Cloud sync returned ok=false." }
+  $ledgerAfterNormal = Get-LedgerFingerprint $NewRoot
+  if ($ledgerAfterAudit -ne $ledgerAfterNormal) { throw "Ledger truth changed during normal-mode cutover smoke." }
+
+  Set-Content $CurrentPointer $NewRoot -Encoding ascii
+  $pointerCutover = $true
+  $promoted = $true
+  Write-Host "v0.3.18 FINAL promotion complete. Active pointer updated only after full live audit and normal-mode smoke." -ForegroundColor Green
+  Write-Host "Use scripts\start-backend.ps1 for normal daily use. Expo Go is not required." -ForegroundColor Green
+
+  $builder = Join-Path $NewRoot "scripts\build-android-apk.ps1"
+  if (-not (Test-Path $builder)) { throw "Android EAS builder missing after successful promotion." }
+  Write-Host "Starting final Android APK cloud build with pinned EAS CLI 24.3.0..." -ForegroundColor Cyan
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $builder
+  if ($LASTEXITCODE -ne 0) { throw "v0.3.18 FINAL is installed and healthy, but the EAS Android APK build failed. The healthy v0.3.18 install remains active." }
+  Write-Host "v0.3.18 FINAL update + EAS APK submission completed." -ForegroundColor Green
+} catch {
+  Write-Host ("Update failed: " + $_.Exception.Message) -ForegroundColor Red
+  if (-not $promoted) {
+    try { Stop-EasonProcesses } catch {}
+    try { Set-AuditEnvironment $false } catch {}
+    if ($PreviousRoot -and (Test-PreviousRoot $PreviousRoot)) {
+      try { Set-Content $CurrentPointer $PreviousRoot -Encoding ascii } catch {}
+      if ($stopped) { Restart-PreviousInstall $PreviousRoot }
+    }
+  } else {
+    Write-Host "Local/Cloud v0.3.18 FINAL already passed promotion gates and remains active; only a post-promotion step failed." -ForegroundColor Yellow
+  }
+  throw
+} finally {
+  try { Set-AuditEnvironment $false } catch {}
+  if (Test-Path $NpmCache) { Remove-Item $NpmCache -Recurse -Force -ErrorAction SilentlyContinue }
+}

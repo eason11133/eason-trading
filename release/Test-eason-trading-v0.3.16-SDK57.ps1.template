@@ -1,0 +1,135 @@
+$ErrorActionPreference = "Stop"
+
+if (-not (node -v 2>$null)) { throw "Node.js was not found. Install Node.js 22.13+ and retry." }
+$nodeSemver=[version]((node -p "process.versions.node").Trim())
+if($nodeSemver -lt [version]"22.13.0"){throw "Node.js 22.13+ is required by Expo SDK 57. Found $nodeSemver"}
+
+$ExpectedZipSha256="__ZIP_SHA256__"
+$SourceZipGlob='__SOURCE_ZIP_GLOB__'
+$SourceLabel='__SOURCE_LABEL__'
+$Downloads=Join-Path $env:USERPROFILE "Downloads"
+$CurrentPointer=Join-Path $Downloads "eason-trading-current.txt"
+$Stamp=Get-Date -Format 'yyyyMMdd-HHmmss'
+$StageBase=Join-Path $env:TEMP ("eason-trading-sdk57-preflight-v0.3.16-"+$Stamp)
+$StageRoot=Join-Path $StageBase "eason-trading-v1"
+$NpmCache=Join-Path $StageBase "npm-cache"
+$Report=Join-Path $Downloads "eason-trading-sdk57-preflight-v0.3.16-result.txt"
+$LockOut=Join-Path $Downloads "eason-trading-sdk57-v0.3.16-verified-package-lock.json"
+$PackageOut=Join-Path $Downloads "eason-trading-sdk57-v0.3.16-verified-package.json"
+$ManifestOut=Join-Path $Downloads "eason-trading-sdk57-v0.3.16-verification-manifest.json"
+
+function Find-VerifiedZip {
+  $candidates=Get-ChildItem -Path $Downloads -Filter $SourceZipGlob -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+  foreach($z in $candidates){
+    $h=(Get-FileHash -Algorithm SHA256 -Path $z.FullName).Hash.ToLowerInvariant()
+    if($h -eq $ExpectedZipSha256){return $z}
+  }
+  throw "The exact $SourceLabel ZIP was not found in Downloads, or its SHA256 does not match this preflight script."
+}
+function Invoke-Sdk57NpmInstall {
+  param([string]$CachePath)
+  npm install --registry=https://registry.npmjs.org/ --cache $CachePath --prefer-online --fetch-retries=3 --fetch-retry-mintimeout=1000 --fetch-retry-maxtimeout=10000 --no-audit --no-fund
+  if($LASTEXITCODE -eq 0){return}
+  Write-Host 'First npm install attempt failed. Retrying once with a fresh isolated cache...' -ForegroundColor Yellow
+  if(Test-Path $CachePath){Remove-Item $CachePath -Recurse -Force -ErrorAction SilentlyContinue}
+  New-Item -ItemType Directory -Force -Path $CachePath|Out-Null
+  npm install --registry=https://registry.npmjs.org/ --cache $CachePath --prefer-online --fetch-retries=3 --fetch-retry-mintimeout=1000 --fetch-retry-maxtimeout=10000 --no-audit --no-fund
+  if($LASTEXITCODE -ne 0){throw 'SDK57 npm install failed after one clean-cache retry.'}
+}
+
+Write-Host ""
+Write-Host "=== Eason Trading v0.3.16 SDK57 isolated preflight ===" -ForegroundColor Cyan
+Write-Host "This does NOT update eason-trading-current.txt and does NOT modify the active v0.3.15 install." -ForegroundColor Yellow
+if(Test-Path $CurrentPointer){Write-Host ("Current active root remains: "+(Get-Content $CurrentPointer -Raw).Trim()) -ForegroundColor DarkGray}
+
+$Zip=Find-VerifiedZip
+Write-Host "Source ZIP checksum verified: $SourceLabel" -ForegroundColor Green
+
+$oldRegistry=$env:npm_config_registry;$oldCache=$env:npm_config_cache;$oldPreferOnline=$env:npm_config_prefer_online
+try{
+  if(Test-Path $StageBase){Remove-Item $StageBase -Recurse -Force}
+  New-Item -ItemType Directory -Force -Path $StageBase|Out-Null
+  Expand-Archive -Path $Zip.FullName -DestinationPath $StageBase -Force
+  if(-not(Test-Path (Join-Path $StageRoot 'scripts\verify-install-source.mjs'))){throw 'Extracted preflight package is incomplete.'}
+
+  Push-Location $StageRoot
+  try{
+    Write-Host "Checking clean SDK57 source package..." -ForegroundColor Cyan
+    node .\scripts\verify-install-source.mjs
+    if($LASTEXITCODE -ne 0){throw 'install source check failed'}
+
+    Write-Host "Installing the real Expo SDK57 dependency tree in isolated staging..." -ForegroundColor Cyan
+    New-Item -ItemType Directory -Force -Path $NpmCache|Out-Null
+    $env:npm_config_registry='https://registry.npmjs.org/'
+    $env:npm_config_cache=$NpmCache
+    $env:npm_config_prefer_online='true'
+    Push-Location .\mobile
+    try{
+      Invoke-Sdk57NpmInstall -CachePath $NpmCache
+    } finally { Pop-Location }
+
+    Write-Host "Normalizing dependencies with the installed Expo SDK 57 compatibility ledger..." -ForegroundColor Cyan
+    node .\scripts\run-expo.mjs install --fix --npm
+    if($LASTEXITCODE -ne 0){throw 'expo install --fix failed'}
+
+    Write-Host "Running Expo dependency check + Doctor + config + true tsc + Android/iOS bundle smoke..." -ForegroundColor Cyan
+    node .\scripts\verify-install-runtime.mjs --typecheck-only
+    if($LASTEXITCODE -ne 0){throw 'SDK57 mobile runtime verification failed'}
+
+    $mobileDir=Join-Path $StageRoot 'mobile'
+    $rootLock=Join-Path $StageRoot 'package-lock.json'
+    $mobileLock=Join-Path $mobileDir 'package-lock.json'
+    $lock=if(Test-Path $rootLock){$rootLock}elseif(Test-Path $mobileLock){$mobileLock}else{$null}
+    $lockScope=if($lock -eq $rootLock){'workspace-root'}else{'mobile'}
+    $normalizedPkg=Join-Path $mobileDir 'package.json'
+    if(-not $lock){throw 'SDK57 verification passed but npm did not produce a package-lock.json at the workspace root or mobile workspace.'}
+    Copy-Item $lock $LockOut -Force
+    Copy-Item $normalizedPkg $PackageOut -Force
+    $lockHash=(Get-FileHash -Algorithm SHA256 -Path $LockOut).Hash.ToLowerInvariant()
+    $packageHash=(Get-FileHash -Algorithm SHA256 -Path $PackageOut).Hash.ToLowerInvariant()
+    $versions=node .\scripts\read-sdk57-lock-versions.mjs $lock
+    if($LASTEXITCODE -ne 0){throw 'Could not capture verified SDK57 dependency versions.'}
+    $resolved=$versions|ConvertFrom-Json
+    if($resolved.expo -notmatch '^57\.'){throw "Verified lock resolved Expo $($resolved.expo), expected SDK 57.x."}
+    if($resolved.react -ne '19.2.3'){throw "Verified lock resolved React $($resolved.react), expected 19.2.3."}
+    if($resolved.reactNative -ne '0.86.3'){throw "Verified lock resolved React Native $($resolved.reactNative), expected 0.86.3."}
+    if(-not $resolved.localBuildCacheProvider){throw 'Verified lock is missing @expo/local-build-cache-provider required by Expo SDK 57.'}
+    $manifest=[ordered]@{proofVersion=1;status='PASS';timestamp=(Get-Date).ToString('o');sourceLabel=$SourceLabel;sourceZipSha256=$ExpectedZipSha256;node=(node -v);npm=(npm -v);verifiedVersions=$resolved;lockScope=$lockScope;packageJsonSha256=$packageHash;packageLockSha256=$lockHash;activeInstallModified=$false}
+    $manifest|ConvertTo-Json -Depth 6|Set-Content $ManifestOut -Encoding utf8
+  } finally { Pop-Location }
+
+  @(
+    'Eason Trading v0.3.16 SDK57 PRE-FLIGHT PASS',
+    ('Timestamp: '+(Get-Date).ToString('o')),
+    ('Node: '+(node -v)),
+    ('Source: '+$SourceLabel),
+    ('ZIP SHA256: '+$ExpectedZipSha256),
+    ('Verified package-lock: '+$LockOut),
+    ('Verification manifest: '+$ManifestOut),
+    'Active install was not modified.',
+    'The exact SDK57 dependency tree passed Expo check, Expo Doctor, config/plugin evaluation, true TypeScript typecheck, Android bundle and iOS bundle smoke.'
+  ) | Set-Content $Report -Encoding utf8
+  Write-Host "SDK57 PRE-FLIGHT PASSED. Active v0.3.15 was not modified." -ForegroundColor Green
+  Write-Host "Verified package-lock saved to: $LockOut" -ForegroundColor Green
+  Write-Host "Verification manifest saved to: $ManifestOut" -ForegroundColor Green
+  Write-Host "Result report: $Report" -ForegroundColor Green
+} catch {
+  @(
+    'Eason Trading v0.3.16 SDK57 PRE-FLIGHT FAILED',
+    ('Timestamp: '+(Get-Date).ToString('o')),
+    ('Node: '+(node -v)),
+    ('Source: '+$SourceLabel),
+    ('ZIP SHA256: '+$ExpectedZipSha256),
+    ('Failure: '+$_.Exception.Message),
+    'Active install was not modified.'
+  ) | Set-Content $Report -Encoding utf8
+  Write-Host ("SDK57 PRE-FLIGHT FAILED: "+$_.Exception.Message) -ForegroundColor Red
+  Write-Host "Active install was not modified. Baseline remains v0.3.15." -ForegroundColor Yellow
+  Write-Host "Result report: $Report" -ForegroundColor Yellow
+  throw
+} finally {
+  $env:npm_config_registry=$oldRegistry
+  $env:npm_config_cache=$oldCache
+  $env:npm_config_prefer_online=$oldPreferOnline
+  if(Test-Path $StageBase){Remove-Item $StageBase -Recurse -Force -ErrorAction SilentlyContinue}
+}

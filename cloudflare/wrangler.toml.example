@@ -1,0 +1,21 @@
+name = "eason-trading-monitor"
+main = "src/worker.mjs"
+compatibility_date = "2026-09-08"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "eason-trading-monitor"
+database_id = "REPLACE_AFTER_CREATE"
+
+[vars]
+# setup-cloud-monitor.ps1 fills the deployed workers.dev URL here after the first deploy.
+PUBLIC_BASE_URL = ""
+
+[triggers]
+crons = ["* * * * *"]
+
+# Secrets stay in Worker only:
+# npx wrangler secret put TRADING_API_KEY
+# npx wrangler secret put FUGLE_API_KEY
+# npx wrangler secret put MCP_BEARER_TOKEN

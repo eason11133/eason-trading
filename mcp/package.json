@@ -1,0 +1,20 @@
+{
+  "name": "eason-trading-mcp",
+  "version": "0.3.18",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/stdio.ts",
+    "http": "tsx src/http.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "@modelcontextprotocol/node": "^2.0.0",
+    "zod": "^4.2.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "@types/node": "^24.0.0"
+  }
+}

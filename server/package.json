@@ -1,0 +1,11 @@
+{
+  "name": "eason-trading-server",
+  "version": "0.3.18",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.mjs",
+    "start": "node src/server.mjs",
+    "test": "node ../scripts/run-server-tests.mjs"
+  }
+}

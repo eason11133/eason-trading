@@ -1,0 +1,14 @@
+{
+  "name": "eason-trading-v1",
+  "private": true,
+  "workspaces": [
+    "mobile",
+    "server",
+    "mcp"
+  ],
+  "scripts": {
+    "server": "npm --workspace server run dev",
+    "test": "npm --workspace server test"
+  },
+  "version": "0.3.18"
+}

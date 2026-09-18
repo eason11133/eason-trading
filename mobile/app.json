@@ -1,0 +1,47 @@
+{
+  "expo": {
+    "name": "Eason Trading",
+    "slug": "eason-trading",
+    "version": "0.3.18",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "android": {
+      "package": "com.eason.trading",
+      "googleServicesFile": "./google-services.json",
+      "versionCode": 318
+    },
+    "ios": {
+      "bundleIdentifier": "com.eason.trading",
+      "config": {
+        "usesNonExemptEncryption": false
+      },
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "Eason Trading 需要連接同一個 Wi-Fi 上的個人交易 Backend。",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      },
+      "buildNumber": "318"
+    },
+    "plugins": [
+      "expo-notifications",
+      "expo-secure-store",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ],
+    "extra": {
+      "internalVersion": "0.3.18",
+      "eas": {
+        "projectId": "f98e196e-d149-42f8-b7c2-ccb887d60080"
+      }
+    },
+    "icon": "./assets/icon.png",
+    "owner": "eason_systems"
+  }
+}

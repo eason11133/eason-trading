@@ -1,0 +1,139 @@
+$ErrorActionPreference = "Stop"
+if (-not (node -v 2>$null)) { throw "Node.js was not found. Install Node.js 22.13+ and retry." }
+$nodeSemver=[version]((node -p "process.versions.node").Trim())
+if($nodeSemver -lt [version]"22.13.0"){throw "Node.js 22.13+ is required by Expo SDK 57. Found $nodeSemver"}
+
+$TargetVersion=[version]"0.3.16";$TargetLabel="0.3.16";$ExpectedZipSha256="__ZIP_SHA256__"
+$Downloads=Join-Path $env:USERPROFILE "Downloads";$NewDir=Join-Path $Downloads "eason-trading-v1-source-v0.3.16";$NewRoot=Join-Path $NewDir "eason-trading-v1";$BackupBase=Join-Path $Downloads "eason-trading-backups";$CurrentPointer=Join-Path $Downloads "eason-trading-current.txt"
+$InstallId=[guid]::NewGuid().ToString('N');$StageDir=Join-Path $Downloads (".eason-trading-v0.3.16-staging-"+$InstallId);$StageRoot=Join-Path $StageDir 'eason-trading-v1';$Sdk57NpmCache=Join-Path $env:TEMP ("eason-trading-sdk57-npm-cache-"+$InstallId)
+$VerifiedLock=Join-Path $Downloads 'eason-trading-sdk57-v0.3.16-verified-package-lock.json';$VerifiedPackage=Join-Path $Downloads 'eason-trading-sdk57-v0.3.16-verified-package.json';$VerifiedManifest=Join-Path $Downloads 'eason-trading-sdk57-v0.3.16-verification-manifest.json'
+
+function New-RandomHex([int]$Bytes=32){$buf=New-Object byte[] $Bytes;$rng=[System.Security.Cryptography.RandomNumberGenerator]::Create();try{$rng.GetBytes($buf)}finally{$rng.Dispose()};return -join($buf|ForEach-Object{$_.ToString('x2')})}
+function Test-Root([string]$Root){return $Root -and (Test-Path (Join-Path $Root 'scripts\start-web.ps1'))}
+function Read-Pointer{if(Test-Path $CurrentPointer){$x=(Get-Content $CurrentPointer -Raw).Trim();if(Test-Root $x){return $x}};return $null}
+function Resolve-PreviousRoot{
+ $active=Read-Pointer;if($active){Write-Host "Using active-install pointer: $active" -ForegroundColor DarkGray;return $active}
+ $rows=Get-ChildItem -Path $Downloads -Directory -Filter 'eason-trading-v1-source-v*' -ErrorAction SilentlyContinue|ForEach-Object{if($_.Name -match '^eason-trading-v1-source-v(\d+\.\d+\.\d+)(?:-.*)?$'){[pscustomobject]@{Root=(Join-Path $_.FullName 'eason-trading-v1');Version=[version]$Matches[1]}}}|Where-Object{$_.Version -lt $TargetVersion -and (Test-Root $_.Root)}|Sort-Object Version -Descending
+ $state=$rows|Where-Object{Test-Path (Join-Path $_.Root 'server\data\state.json')}|Select-Object -First 1;if($state){return $state.Root}
+ $envrow=$rows|Where-Object{Test-Path (Join-Path $_.Root '.env.local')}|Select-Object -First 1;if($envrow){return $envrow.Root}
+ return ($rows|Select-Object -First 1).Root
+}
+function FileHashOrNull([string]$Path){if(Test-Path $Path){return (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLowerInvariant()};return $null}
+function Stop-EasonProcesses{foreach($port in 8787,8081){$listeners=Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue;foreach($listener in $listeners){Stop-Process -Id $listener.OwningProcess -Force -ErrorAction SilentlyContinue}};Start-Sleep -Milliseconds 600}
+function Restart-PreviousInstall([string]$Root){if(-not(Test-Root $Root)){return};try{Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $Root 'scripts\start-web.ps1')) -WorkingDirectory $Root|Out-Null;Write-Host 'Previous v0.3.15 was restarted after the failed promotion.' -ForegroundColor Yellow}catch{Write-Host 'Could not automatically restart the previous install; its files and active pointer are still intact.' -ForegroundColor Yellow}}
+function Restore-NpmEnv([string]$Registry,[string]$Cache,[string]$PreferOnline){$env:npm_config_registry=$Registry;$env:npm_config_cache=$Cache;$env:npm_config_prefer_online=$PreferOnline}
+function Find-VerifiedSourceZip {
+ $candidates=Get-ChildItem -Path $Downloads -Filter 'eason-trading-v1-source-v0.3.16*.zip' -File -ErrorAction SilentlyContinue|Sort-Object LastWriteTime -Descending
+ foreach($candidate in $candidates){$hash=(Get-FileHash -Algorithm SHA256 -Path $candidate.FullName).Hash.ToLowerInvariant();if($hash -eq $ExpectedZipSha256){return $candidate}}
+ throw "The exact v0.3.16 source ZIP matching installer SHA256 $ExpectedZipSha256 was not found in Downloads."
+}
+function Get-EnvValue([string]$File,[string]$Name){
+ if(-not(Test-Path $File)){return $null}
+ foreach($line in Get-Content $File){$x=$line.Trim();if(-not $x -or $x.StartsWith('#')){continue};$parts=$x.Split('=',2);if($parts.Count -eq 2 -and $parts[0].Trim().Trim([char]0xFEFF) -eq $Name){return $parts[1].Trim()}}
+ return $null
+}
+function Start-NewInstallAndVerify([string]$Root){
+ $envFile=Join-Path $Root '.env.local';$apiKey=Get-EnvValue $envFile 'TRADING_API_KEY';if(-not $apiKey){throw 'TRADING_API_KEY missing from promoted staging config before startup smoke.'}
+ $launcher=Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $Root 'scripts\start-web.ps1')) -WorkingDirectory $Root -PassThru
+ $health=$null;$webReady=$false
+ for($i=0;$i -lt 120;$i++){
+   try{$health=Invoke-RestMethod 'http://127.0.0.1:8787/health' -Headers @{'x-api-key'=$apiKey} -TimeoutSec 2}catch{$health=$null}
+   $webReady=[bool](Get-NetTCPConnection -LocalPort 8081 -State Listen -ErrorAction SilentlyContinue)
+   if($health -and $health.version -eq '0.3.16' -and $health.marketDataVerified -eq $true -and $health.quotesReady -eq $true -and $webReady){return $launcher}
+   if($launcher.HasExited){break}
+   Start-Sleep -Milliseconds 500
+ }
+ $detail=if($health){"health version=$($health.version), marketDataVerified=$($health.marketDataVerified), quotesReady=$($health.quotesReady), webReady=$webReady"}else{"backend health unavailable, webReady=$webReady"}
+ throw "v0.3.16 startup smoke failed before active pointer cutover: $detail"
+}
+
+Write-Host "";Write-Host "=== Eason Trading v$TargetLabel production update ===" -ForegroundColor Cyan
+$Zip=Find-VerifiedSourceZip
+$ActualHash=(Get-FileHash -Algorithm SHA256 -Path $Zip.FullName).Hash.ToLowerInvariant();Write-Host ("Package checksum verified: "+$Zip.Name) -ForegroundColor Green
+
+$PreviousRoot=Resolve-PreviousRoot;$InitialActive=Read-Pointer;$StateSource=$null;$EnvSource=$null
+if(-not $PreviousRoot){throw 'A verified previous Eason Trading install is required for this v0.3.16 in-place upgrade.'}
+Write-Host "Previous active root: $PreviousRoot" -ForegroundColor DarkGray
+
+# Phase 1: reproduce the exact SDK57 graph that already passed isolated preflight, while v0.3.15 remains online.
+foreach($proof in @($VerifiedLock,$VerifiedPackage,$VerifiedManifest)){if(-not(Test-Path $proof)){throw "Verified SDK57 preflight artifact is missing: $proof. Run the matching isolated preflight before production update."}}
+$oldRegistry=$env:npm_config_registry;$oldCache=$env:npm_config_cache;$oldPreferOnline=$env:npm_config_prefer_online
+try{
+ if(Test-Path $StageDir){Remove-Item $StageDir -Recurse -Force};New-Item -ItemType Directory -Force -Path $StageDir|Out-Null
+ Expand-Archive -Path $Zip.FullName -DestinationPath $StageDir -Force
+ if(-not(Test-Root $StageRoot)){throw 'Extracted staging package is incomplete.'}
+ Set-Location $StageRoot;Write-Host 'Checking extracted install package in isolated staging...' -ForegroundColor Cyan;node .\scripts\verify-install-source.mjs;if($LASTEXITCODE -ne 0){throw 'install source check failed'}
+ $proofJson=node .\scripts\verify-sdk57-proof.mjs --manifest $VerifiedManifest --lock $VerifiedLock --package $VerifiedPackage --source-sha $ActualHash;if($LASTEXITCODE -ne 0){throw 'verified SDK57 preflight proof was rejected'}
+ $proof=$proofJson|ConvertFrom-Json
+ Copy-Item $VerifiedPackage (Join-Path $StageRoot 'mobile\package.json') -Force
+ if($proof.lockScope -eq 'workspace-root'){Copy-Item $VerifiedLock (Join-Path $StageRoot 'package-lock.json') -Force;$CiDir=$StageRoot}else{Copy-Item $VerifiedLock (Join-Path $StageRoot 'mobile\package-lock.json') -Force;$CiDir=(Join-Path $StageRoot 'mobile')}
+ New-Item -ItemType Directory -Force -Path $Sdk57NpmCache|Out-Null;$env:npm_config_registry='https://registry.npmjs.org/';$env:npm_config_cache=$Sdk57NpmCache;$env:npm_config_prefer_online='true'
+ Push-Location $CiDir;try{Write-Host 'Reproducing the exact preflight-verified Expo SDK 57 graph with npm ci...' -ForegroundColor Yellow;npm ci --registry=https://registry.npmjs.org/ --cache $Sdk57NpmCache --prefer-online --fetch-retries=3 --fetch-retry-mintimeout=1000 --fetch-retry-maxtimeout=10000 --no-audit --no-fund;if($LASTEXITCODE -ne 0){throw 'SDK57 npm ci failed'}}finally{Pop-Location}
+ Set-Location $StageRoot;Write-Host 'Running full SDK57 dependency/Doctor/config/tsc/Android+iOS bundle verification against the locked graph...' -ForegroundColor Cyan;node .\scripts\verify-install-runtime.mjs --typecheck-only;if($LASTEXITCODE -ne 0){throw 'Expo SDK 57 locked runtime verification failed'}
+ Write-Host 'SDK57 locked graph reproduced and reverified while active v0.3.15 remained online.' -ForegroundColor Green
+} catch {
+ Write-Host ("SDK57 staging verification failed: "+$_.Exception.Message) -ForegroundColor Red
+ Write-Host 'Current v0.3.15 was never stopped and active pointer was not changed.' -ForegroundColor Yellow
+ throw
+} finally {
+ Restore-NpmEnv $oldRegistry $oldCache $oldPreferOnline
+ if(Test-Path $Sdk57NpmCache){Remove-Item $Sdk57NpmCache -Recurse -Force -ErrorAction SilentlyContinue}
+}
+
+# Refuse to promote if another installer/process changed the active install during the long SDK57 preflight.
+$ActiveAfterPreflight=Read-Pointer
+if($InitialActive -and $ActiveAfterPreflight -ne $InitialActive){throw "Active install changed during SDK57 preflight. Expected $InitialActive but now points to $ActiveAfterPreflight. Staging was not promoted."}
+
+$stopped=$false;$promoted=$false;$Backup=$null
+try{
+ # Phase 2: only now stop v0.3.15, snapshot the freshest durable state/config, and promote the verified staging tree.
+ Stop-EasonProcesses;$stopped=$true
+ $StateSource=Join-Path $PreviousRoot 'server\data\state.json';if(-not(Test-Path $StateSource)){$StateSource=$null}
+ $EnvSource=Join-Path $PreviousRoot '.env.local';if(-not(Test-Path $EnvSource)){$EnvSource=$null}
+ $Stamp=Get-Date -Format 'yyyyMMdd-HHmmss';$Backup=Join-Path $BackupBase $Stamp;New-Item -ItemType Directory -Force -Path $Backup|Out-Null
+ if($StateSource){Copy-Item $StateSource (Join-Path $Backup 'state.json') -Force;if(Test-Path "$StateSource.bak"){Copy-Item "$StateSource.bak" (Join-Path $Backup 'state.json.bak') -Force}}
+ if($EnvSource){Copy-Item $EnvSource (Join-Path $Backup '.env.local') -Force}
+ Set-Content (Join-Path $Backup 'previous-root.txt') $PreviousRoot -Encoding ascii;$oldApp=Join-Path $PreviousRoot 'mobile\app.json';if(Test-Path $oldApp){Copy-Item $oldApp (Join-Path $Backup 'mobile-app.json') -Force};$oldWrangler=Join-Path $PreviousRoot 'cloudflare\wrangler.toml';if(Test-Path $oldWrangler){Copy-Item $oldWrangler (Join-Path $Backup 'wrangler.toml') -Force};Set-Content (Join-Path $Backup 'installed-root.txt') $NewRoot -Encoding ascii
+ $manifest=[ordered]@{createdAt=(Get-Date).ToString('o');target=$TargetLabel;zipSha256=$ActualHash;previousRoot=$PreviousRoot;installedRoot=$NewRoot;files=[ordered]@{state=FileHashOrNull (Join-Path $Backup 'state.json');stateBak=FileHashOrNull (Join-Path $Backup 'state.json.bak');env=FileHashOrNull (Join-Path $Backup '.env.local');app=FileHashOrNull (Join-Path $Backup 'mobile-app.json');wrangler=FileHashOrNull (Join-Path $Backup 'wrangler.toml')}};$manifest|ConvertTo-Json -Depth 5|Set-Content (Join-Path $Backup 'backup-manifest.json') -Encoding utf8
+ Write-Host "Fresh durable backup created after stopping the old backend: $Backup" -ForegroundColor DarkGray
+
+ if($StateSource){New-Item -ItemType Directory -Force -Path (Join-Path $StageRoot 'server\data')|Out-Null;Copy-Item $StateSource (Join-Path $StageRoot 'server\data\state.json') -Force;Write-Host 'Latest durable ledger/state copied into verified staging.' -ForegroundColor Green}
+ if($EnvSource){Copy-Item $EnvSource (Join-Path $StageRoot '.env.local') -Force;Write-Host 'Local Fugle/API/Cloud settings copied into verified staging.' -ForegroundColor Green}
+ $NewEnv=Join-Path $StageRoot '.env.local';if(-not(Test-Path $NewEnv) -and $env:FUGLE_API_KEY){Set-Content $NewEnv ("FUGLE_API_KEY="+$env:FUGLE_API_KEY.Trim()) -Encoding ascii}
+ if(-not(Test-Path $NewEnv)){throw 'Existing .env.local could not be preserved; refusing to promote rather than asking for a secret during upgrade.'}
+ $EnvLines=@(Get-Content $NewEnv);if(-not($EnvLines|Where-Object{$_ -match '^\s*TRADING_API_KEY\s*=\s*\S+'})){Add-Content $NewEnv ("TRADING_API_KEY="+(New-RandomHex 32)) -Encoding ascii;Write-Host 'Generated fail-closed local App-to-Backend token.' -ForegroundColor Green}
+
+ $OldApp=Join-Path $PreviousRoot 'mobile\app.json';$StageApp=Join-Path $StageRoot 'mobile\app.json';if((Test-Path $OldApp)-and(Test-Path $StageApp)){node .\scripts\preserve-upgrade-assets.mjs eas-project-id $OldApp $StageApp;if($LASTEXITCODE -ne 0){throw 'Could not preserve EAS projectId.'}}
+ $OldWrangler=Join-Path $PreviousRoot 'cloudflare\wrangler.toml';if(Test-Path $OldWrangler){Copy-Item $OldWrangler (Join-Path $StageRoot 'cloudflare\wrangler.toml') -Force}
+ $OldCloudWorker=Join-Path $PreviousRoot 'cloudflare\src\worker.mjs';$StageCloudWorker=Join-Path $StageRoot 'cloudflare\src\worker.mjs';if((Test-Path $OldCloudWorker)-and(Test-Path $StageCloudWorker)){node .\scripts\preserve-upgrade-assets.mjs cloud-worker $OldCloudWorker $StageCloudWorker 0.3.15 0.3.16;if($LASTEXITCODE -ne 0){throw 'Could not preserve active GPT Action Worker source.'};Write-Host 'Preserved the active GPT Action Worker source without redeploying Cloudflare.' -ForegroundColor Green}
+ Set-Content (Join-Path $StageRoot '.previous-install-imported') (Split-Path -Leaf (Split-Path -Parent $PreviousRoot)) -Encoding ascii
+
+ Set-Location $StageRoot;Write-Host 'Checking the freshly snapshotted real ledger against v0.3.16 before promotion...' -ForegroundColor Cyan;node .\scripts\verify-install-runtime.mjs --ledger-only;if($LASTEXITCODE -ne 0){throw 'imported ledger verification failed'}
+ $installMarker=[ordered]@{version=$TargetLabel;installedAt=(Get-Date).ToString('o');sourceZipSha256=$ActualHash;backup=$Backup;previousRoot=$PreviousRoot;mobileSdk='57'};$installMarker|ConvertTo-Json|Set-Content (Join-Path $StageRoot '.eason-install.json') -Encoding utf8
+
+ # Windows refuses to move a directory tree when this PowerShell process still has its current working directory inside that tree.
+ # Leave staging before promoting its parent directory.
+ Set-Location $Downloads
+ if(Test-Path $NewDir){
+   if((Read-Pointer) -eq $NewRoot){throw 'Refusing to replace v0.3.16 directory because it is already the active install.'}
+   Remove-Item $NewDir -Recurse -Force
+ }
+ Move-Item -Path $StageDir -Destination $NewDir
+ if(-not(Test-Root $NewRoot)){throw 'Promoted v0.3.16 root is incomplete.'}
+ Write-Host 'Starting v0.3.16 and verifying Backend/Fugle/quotes/Web before changing the active pointer...' -ForegroundColor Cyan
+ $newLauncher=Start-NewInstallAndVerify $NewRoot
+ Write-Host 'v0.3.16 startup smoke passed while active pointer still referenced v0.3.15.' -ForegroundColor Green
+ Set-Content $CurrentPointer $NewRoot -Encoding ascii;$promoted=$true
+ Write-Host 'v0.3.16 update completed. Active-install pointer updated only after SDK57, real-ledger, and live startup verification passed.' -ForegroundColor Green
+ Write-Host 'Eason Trading v0.3.16 is running in a separate PowerShell window.' -ForegroundColor Green
+}catch{
+ Write-Host ("Install promotion failed: "+$_.Exception.Message) -ForegroundColor Red
+ if(-not $promoted){
+   try{Stop-EasonProcesses}catch{}
+   if(Test-Path $StageDir){Remove-Item $StageDir -Recurse -Force -ErrorAction SilentlyContinue}
+   if($PreviousRoot -and (Test-Root $PreviousRoot)){try{Set-Content $CurrentPointer $PreviousRoot -Encoding ascii}catch{};if($stopped){Restart-PreviousInstall $PreviousRoot}}
+ }
+ throw
+}finally{
+ if(Test-Path $Sdk57NpmCache){Remove-Item $Sdk57NpmCache -Recurse -Force -ErrorAction SilentlyContinue}
+}
