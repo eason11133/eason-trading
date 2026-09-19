@@ -1,4 +1,4 @@
-# $0 Cloud Monitor deployment — v0.3.14
+# $0 Cloud Monitor deployment — v0.3.18 FINAL-R3
 
 The Cloudflare layer is **monitor-only**. It is not a second trading backend and it never stores the user's portfolio ledger.
 

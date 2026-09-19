@@ -1,4 +1,6 @@
-# Eason Trading v0.3.16 UI1
+# Eason Trading v0.3.16 UI1 (historical design note)
+
+> Retained as design history. The current production source baseline is v0.3.18 FINAL-R3.
 
 Scope: presentation and information hierarchy only.
 

@@ -1,89 +1,132 @@
-# Eason Trading v0.3.18
+# Eason Trading
 
-Eason Trading 不是第二個 Yahoo 股市。它只負責三件事：**記住 GPT 的策略、盤中安靜監控、收盤後把完整資料交給 GPT 復盤**。
+Eason Trading is a personal decision-support system for a workflow that already uses GPT for strategy reasoning and Yahoo Finance for visual market inspection. It fills the missing layer between them: persistent strategy memory, deterministic monitoring, exact event handoff, and safe local/cloud synchronization.
 
-## 真正使用方式
+**GPT reasons about strategy. The local backend owns authoritative trading truth. Cloudflare provides PC-off monitoring and event delivery. A shared deterministic trigger engine turns strategy into executable rules while preventing AI from changing cash, executed trades, or holding quantities.**
 
-### 盤中
+> **Current baseline:** v0.3.18 FINAL-R3. The immutable production tag is [`v0.3.18-final-r3`](https://github.com/eason11133/eason-trading/tree/v0.3.18-final-r3).
 
-平常不用開 App。看盤仍用 Yahoo，判斷仍跟 GPT 討論。
+## Why I built this
 
-Eason Trading 會在本機／Cloud 監控 GPT 留下的結構化條件。通知不是單純「碰到價格」就發，而是經過安全的 smart-trigger 規則判斷，例如：
+My original workflow was fragmented: I discussed strategy with GPT, inspected charts in Yahoo Finance, copied screenshots and numbers between tools, and had no reliable place for a strategy to remain active after the conversation ended. A useful reassessment could also be lost unless I happened to be watching the market at the right moment.
 
-- 進入 GPT 定義的價格區間
-- invalidation 尚未成立
-- RVOL / VWAP / 漲跌幅 / 高低點條件符合
-- 條件連續成立指定次數
-- 狀態真的從不符合轉成符合
-- cooldown / one-shot 規則允許
+Eason Trading intentionally does **not** replace Yahoo Finance. Yahoo remains the viewing tool; GPT remains the reasoning tool. Eason Trading remembers the plan, monitors structured conditions, freezes the evidence when something meaningful happens, and synchronizes the resulting strategy safely.
 
-同一狀態下重複 tick 不會一直洗通知。Setup 已失效時，進場型提醒不會再發。
+## Core workflow
 
-通知會保存「為什麼這次值得重新判斷」的 evidence。點通知後，Cloud event 會先標記成 GPT_SENT，再開使用者設定的股票 GPT 對話；GPT Action 可直接讀取該事件，不需要截圖或手動貼 JSON。
+### During market hours
 
-### 收盤後
-
-這才是主要打開 App 的時間。
-
-首頁會顯示當日資料是否已整理，主要按鈕只有：
-
-**交給 GPT 復盤**
-
-App 會先重新產生當日 close package，再建立 handoff、同步 GPT bridge，然後開 GPT。Close package 會整理系統真正擁有的資料，例如持股狀態、收盤行情、監控策略、今日 Trigger、失效／複判狀態；未知資料會保留為 unknown，不會自行補值。
-
-GPT 若修改策略，正常流程是 Action → Cloud command → Backend reconcile → App Diff / apply。Raw `EASON_TRADING_UPDATE_V1` 只保留為 Direct Action 真正失敗時的 fallback。
-
-## 資料邊界
-
-Local Ledger 永遠是唯一真實帳本。
-
-Cloudflare 只保存可重建的 monitor / event / GPT strategy bridge 狀態，不是第二份 Ledger。GPT 不能透過遠端工具修改：
-
-- 現金
-- 成交紀錄
-- 持股數量
-- Ledger truth
-
-GPT 可以更新的是策略、setup、playbook、review trigger 等非帳本資料。
-
-## 手機 UI
-
-v0.3.18 把主畫面收斂成 event-driven：
-
-- 盤中沒事：`目前沒有需要處理的事`
-- 有意義事件：優先顯示一件「值得重新判斷」與原因
-- 收盤後：`今日資料已整理` + `交給 GPT 復盤`
-- `持股`、`監控策略`、系統狀態都移到次級入口
-
-分時與 K 線維持原生 SVG 向量繪製，不使用放大的 raster 圖。
-
-## 日常啟動
-
-已安裝 Android APK 後不需要 Expo Go。
-
-Windows 開 Backend：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File ".\scripts\start-backend.ps1"
+```text
+GPT strategy
+    → structured review trigger
+    → shared deterministic rule engine
+    → local and PC-off cloud monitoring
+    → meaningful state transition
+    → frozen event snapshot + Expo push
+    → GPT reassessment of that exact event
 ```
 
-它會檢查 Node、Fugle、Backend health，並同步 Cloud targets / device / GPT bridge。需要重新配對手機時才產生 pairing code。
+Notifications are not raw price-touch alerts. A rule can combine price, RVOL, VWAP, daily high/low, and percentage change; require consecutive qualifying ticks; enforce cooldown or one-shot behavior; reject stale strategy versions; and give invalidation precedence over an old entry thesis.
 
-## v0.3.18 升級
+### After market close
 
-請使用正式 updater，不要手動覆蓋資料夾：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\Update-eason-trading-v0.3.18-SDK57.ps1"
+```text
+daily close package
+    → GPT review
+    → strategy-only response
+    → validated diff/apply or no-change
+    → next-session monitor synchronization
 ```
 
-Updater 會先在 staging 安裝依賴與跑完整 gate，舊版保持在線；只有新版本 local + Cloud 驗證成功後才更新 `eason-trading-current.txt`。失敗時舊 baseline 保持可回復。
+The close package carries tracked market/setup/trigger context but deliberately omits cash amounts and executed-trade history from the GPT bridge. See [Architecture](docs/ARCHITECTURE.md#after-close-package) and the implementation in [`server/src/cloud-monitor.mjs`](server/src/cloud-monitor.mjs).
 
-## Custom GPT Action
+## System architecture
 
-Cloud Worker 提供：
+```mermaid
+flowchart TB
+    YF[Yahoo Finance<br/>external viewing tool]
+    GPT[Custom GPT<br/>strategy reasoning]
+    CF[Cloudflare Worker + D1<br/>PC-off monitor, events, GPT bridge, push orchestration]
+    BE[Local Node backend<br/>authoritative Ledger, validation, reconciliation, market data]
+    APP[React Native / Expo app<br/>event review, holdings, close review, safe apply]
+    FUGLE[Fugle market data]
+    PUSH[Expo Push]
 
-- `/gpt-action-openapi.json`
-- `/gpt-action-instructions.txt`
+    YF -. visual inspection only .-> GPT
+    GPT <-->|Bearer-authenticated strategy surface| CF
+    CF <-->|authenticated sync and reconciliation| BE
+    BE <-->|LAN API + one-time pairing| APP
+    FUGLE --> BE
+    FUGLE --> CF
+    CF --> PUSH --> APP
+```
 
-如果你的 Custom GPT 是在 v0.3.18 之前匯入 Action schema，GPT Builder 不會自動刷新已保存的 schema。要使用 v0.3.18 新增的 optional trigger policy 欄位時，需要在 GPT Builder **重新匯入一次**新版 OpenAPI；這是 ChatGPT 設定面的限制，不是 App runtime 能自動修改的設定。
+D1 holds reconstructable monitoring, event, device, and GPT-command state. It is not a second trading Ledger. The complete component and data-ownership model is documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Engineering highlights
+
+- **Hybrid local/cloud authority:** private trade truth stays local while Cloudflare can monitor when the PC is off. [Architecture](docs/ARCHITECTURE.md#data-ownership)
+- **Deterministic smart triggers:** one shared state machine implements qualification, invalidation, persistence, cooldown, one-shot, re-entry, and version checks. [`shared/smart-trigger.mjs`](shared/smart-trigger.mjs)
+- **Local/cloud semantic parity:** the Worker imports the same trigger engine, with explicit parity tests. [`cloudflare/src/worker.test.mjs`](cloudflare/src/worker.test.mjs)
+- **AI authority boundary:** GPT tools expose strategy writes but no cash, trade, or quantity operation; the local validator rejects Ledger-shaped keys. [`server/src/store.mjs`](server/src/store.mjs), [`cloudflare/src/worker.mjs`](cloudflare/src/worker.mjs)
+- **Exact event correlation:** a trigger freezes its market/context snapshot and carries the same event identity through push, GPT handoff, no-change/apply, and completion. [`server/src/review-triggers.mjs`](server/src/review-triggers.mjs)
+- **Idempotent reconciliation:** duplicate strategy payloads are detected, status only advances, retries are safe, and completed events are retried to Cloud. [`server/src/gpt-update.test.mjs`](server/src/gpt-update.test.mjs)
+- **Release safety:** clean-package checks, isolated test state, installer/rollback contracts, PowerShell interoperability checks, and production audit gates protect the installed baseline. [`scripts/verify-release.mjs`](scripts/verify-release.mjs)
+- **Mobile integration:** Expo/React Native UI, native SVG charts, SecureStore pairing, push response routing, and EAS-compatible Android configuration. [`mobile/`](mobile/)
+
+For a problem/decision/implementation/evidence view, see [`docs/TECHNICAL_HIGHLIGHTS.md`](docs/TECHNICAL_HIGHLIGHTS.md).
+
+## Safety boundary
+
+| GPT may change | GPT must never change |
+| --- | --- |
+| Strategy and priority | Cash |
+| Setup stage and rationale | Executed BUY/SELL records |
+| Playbook levels | Authoritative holding quantity |
+| Review-trigger conditions and policy | Ledger truth |
+| Non-Ledger review state | Any representation of an executed order |
+
+This is enforced at three layers: the remote Action/OpenAPI schema exposes strategy-only operations; Cloud rejects forbidden strategy keys; and the local backend converts a command through the same validated update path before acknowledging it as `APPLIED`. The read replica includes limited position context for reasoning but identifies itself as non-authoritative and excludes cash amounts and executed-trade history.
+
+The reason is architectural, not prompt-based: an AI analysis can be wrong or incomplete, but it must never become a fabricated financial transaction. Evidence is summarized in [`docs/TESTING_AND_SAFETY.md`](docs/TESTING_AND_SAFETY.md).
+
+## Validation
+
+The FINAL-R3 source verifier currently reports:
+
+- **Backend:** 91/91 tests
+- **Cloud Worker:** 24/24 tests
+- **Shared smart-trigger engine:** 8/8 focused state-machine tests
+- **Expo Doctor:** 21/21 checks in the release/runtime validation environment
+- **TypeScript:** real `tsc --noEmit` gate after dependency installation
+- **Mobile bundles:** Android and iOS Expo/Hermes export smoke gates in the release workflow
+
+The repository verifier uses an isolated temporary `state.json`; it does not load the user's Ledger. The separate production audit checks authenticated local/cloud health, command-safe sync, a non-mutating GPT bridge `PING`, Expo push-ticket success, and an unchanged Ledger fingerprint. It requires explicit audit mode so unrelated pending strategy commands are held. See [`docs/TESTING_AND_SAFETY.md`](docs/TESTING_AND_SAFETY.md) and [`scripts/audit-production.ps1`](scripts/audit-production.ps1).
+
+## Repository map
+
+| Path | Evidence to inspect |
+| --- | --- |
+| [`mobile/`](mobile/) | React Native app, event-driven UI, pairing, push routing, SVG charts |
+| [`server/src/`](server/src/) | Authoritative local state, Ledger operations, strategy validation, reconciliation |
+| [`cloudflare/`](cloudflare/) | Worker, D1 migrations, PC-off monitor, GPT Action/OpenAPI, Expo Push |
+| [`shared/smart-trigger.mjs`](shared/smart-trigger.mjs) | Deterministic rule and runtime-state implementation used locally and in Cloud |
+| [`scripts/`](scripts/) | Release verification, production audit, deployment and rollback safeguards |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Components, ownership, event lifecycle, synchronization, failure behavior |
+| [`docs/ENGINEERING_STORY.md`](docs/ENGINEERING_STORY.md) | How the design changed and what I learned |
+
+## Tech stack
+
+- JavaScript, TypeScript, and Node.js
+- React Native and Expo (Android/iOS)
+- Cloudflare Workers and D1
+- Fugle market-data APIs
+- Expo Push Notifications and EAS
+- Custom GPT Actions / OpenAPI and remote MCP-compatible tools
+- PowerShell release and production-audit tooling on Windows
+
+## Status and external configuration
+
+**v0.3.18 FINAL-R3 is the production source baseline.** Source-side support for the GPT Action, Cloud Worker, local backend, mobile app, and safety gates is present here. Attaching the Action to a particular Custom GPT and supplying account secrets are account-side operations and are intentionally not source-controlled. Real `.env` files, `google-services.json`, Cloudflare secrets, runtime state, Ledger data, keystores, and APKs are excluded from Git.
+
+Start with [`START_HERE.md`](START_HERE.md) for operation, [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for design, and [`docs/TECHNICAL_HIGHLIGHTS.md`](docs/TECHNICAL_HIGHLIGHTS.md) for a short technical review.

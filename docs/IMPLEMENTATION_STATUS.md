@@ -1,36 +1,41 @@
-# Implementation status — v0.3.14
+# Implementation status — v0.3.18 FINAL-R3
 
-Status: **release candidate**.
+Status: **production source baseline**.
 
 ## Implemented
-- Authoritative transaction-cost ledger, broker settings, fee/tax trade preview and deterministic quick trade input.
-- Trusted portfolio recomputation and historical net-P/L completeness flags.
-- GPT Review Inbox (`PENDING -> GPT_SENT -> COMPLETED`).
-- GPT update diff preview + ledger-safe strategy undo.
-- Human-readable radar `現在等` state.
-- Monitor-only Cloudflare Worker/D1 with no portfolio/cash/trade ledger.
-- PC-off Trigger Event handoff path: Cloud Trigger -> opaque event URL -> phone -> fixed GPT conversation -> local reconcile when Backend returns.
-- Cloud RVOL uses a time-adjusted daily-volume baseline; RVOL triggers without a baseline are explicitly not Cloud-ready.
-- Standalone mobile Backend pairing: LAN URL + 6-digit one-time code, token persisted in SecureStore.
-- Local and Cloud protected APIs fail closed when their configured secrets are absent.
-- Cloud Push retry bookkeeping, dead-token disabling and same-symbol Fugle quote grouping.
-- Push diagnostics plus a non-trading `test-cloud-push.ps1` path.
-- Cloudflare and EAS one-time setup scripts plus EAS preview-build helper.
-- Active-install pointer, hash-manifest backup, guarded production Installer and matching Rollback.
-- Node.js 20.19+ guard in Expo-related launch/verification/deployment scripts and Installer.
 
-## Verified in this workspace
-- Backend: **77/77 tests pass**.
-- Cloud Worker: **9/9 tests pass**.
-- Mobile + MCP TS/TSX transpile syntax: **22 files / 0 syntax errors**.
-- Release contract / Installer-Rollback static contract / package cleanliness: PASS.
-- Cloud migration is monitor-only and contains no demo account/market seed.
+- Authoritative local Ledger with transaction costs, broker settings, deterministic trade previews, and portfolio recomputation.
+- GPT Review Inbox lifecycle: `PENDING -> GPT_SENT -> COMPLETED`.
+- Shared deterministic trigger engine used by both the local backend and Cloudflare Worker.
+- Structured price/RVOL/VWAP/high/low/change rules with persistence, cooldown, one-shot, reusable re-entry, invalidation precedence, and stale-version rejection.
+- PC-off Cloudflare Worker/D1 monitoring with frozen event snapshots, Expo Push delivery, retry bookkeeping, and dead-token disabling.
+- Exact `reviewEventId` correlation from trigger through GPT reassessment and local apply/no-change completion.
+- GPT strategy read/write bridge with local validation, duplicate detection, apply acknowledgement, and Ledger-safe undo.
+- Standalone mobile pairing using a short-lived one-time code; the resulting API token is stored in SecureStore.
+- Production installer/rollback safeguards, isolated release verification, and a non-mutating production audit.
+- React Native/Expo mobile UI with responsive native SVG charts and dedicated loading, empty, and error states.
 
-## One-time user-environment activation / verification
-- Full Expo/React typecheck is mandatory inside the Windows Installer after it installs the dependency tree; install aborts before active cutover if this fails.
-- Windows-specific backup/cutover is performed by the supplied PowerShell Installer; the cross-platform core verifier is the same script used in this workspace.
-- Cloudflare deployment requires the user's account once.
-- Expo/EAS project initialization and push-capable preview/standalone build require the user's account once.
-- Real phone cold-start notification and PC-off end-to-end trigger flow are not yet verified.
+## Verified from the FINAL-R3 source
 
-Installing v0.3.14 advances the active baseline only after the guarded Installer completes successfully.
+- Backend: **91/91 tests pass**.
+- Cloud Worker: **24/24 tests pass**.
+- Shared trigger engine: **8/8 focused tests pass**.
+- Release contracts, installer/rollback contracts, and package-cleanliness checks: **PASS**.
+- TypeScript: real `tsc --noEmit` verification after dependencies are installed.
+- Expo Doctor: **21/21 checks** in the release/runtime validation environment.
+- Android and iOS Expo export smoke gates are part of the release workflow.
+
+The release verifier creates an isolated temporary state directory and never reads or mutates the user's real Ledger.
+
+## Deliberate authority boundaries
+
+- The local backend owns cash, positions, quantities, average cost, and executed trades.
+- D1 holds reconstructable monitor targets, events, device registrations, GPT read state, and strategy-command status; it is not a second Ledger.
+- GPT can read reasoning context and propose strategy changes, but has no operation for recording a trade, editing cash, or changing authoritative quantity.
+- A queued GPT command becomes `APPLIED` only after the local backend validates and commits the strategy-only update.
+
+## Account-side configuration
+
+Cloudflare, Expo/EAS, Firebase, Fugle, and Custom GPT authentication are intentionally external to source control. Their credentials and real runtime data are not included in this repository. The source contains setup scripts, sanitized examples, schemas, and verification gates; an owner's account configuration determines whether a particular deployment is online.
+
+See [Architecture](ARCHITECTURE.md), [Technical highlights](TECHNICAL_HIGHLIGHTS.md), and [Testing and safety](TESTING_AND_SAFETY.md) for evidence and design rationale.

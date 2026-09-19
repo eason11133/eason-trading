@@ -1,4 +1,6 @@
-# Cloud setup launcher hotfix WIP1
+# Cloud setup launcher hotfix WIP1 (historical)
+
+> Historical v0.3.15 recovery note retained for release archaeology. It is not the current FINAL-R3 setup guide; use [FREE_DEPLOYMENT.md](FREE_DEPLOYMENT.md) for v0.3.18.
 
 This snapshot remains runtime version 0.3.15. It changes only `scripts/setup-cloud-monitor.ps1`.
 
