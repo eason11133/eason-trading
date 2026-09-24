@@ -1,4 +1,5 @@
 import { db, importCloudReviewEvent, founderBrief, radar, listReviewTriggers, listReviewInbox, listHandoffs, latestClosePackage, applyGptUpdate, undoLastGptUpdate } from './store.mjs';
+import {ensureLedgerDevice,applyLedgerMutation} from './ledger-mutations.mjs';
 
 const gptDirectRuntime={lastStateSyncAt:null,lastCommandPollAt:null,lastAppliedAt:null,lastError:null};
 export function gptDirectRuntimeStatus(){
@@ -112,6 +113,21 @@ export async function syncAllCloudDevices(){
 
 export async function cloudMonitorHealth(){return call('/health');}
 
+export async function registerCloudLedgerDevice(){
+ const device=ensureLedgerDevice();const cfg=cloudMonitorConfig();if(!cfg.configured)return {ok:false,skipped:true,device};
+ const result=await call('/v1/ledger/devices',{method:'POST',body:JSON.stringify(device)});return {ok:true,device,result};
+}
+export function mobileLedgerCloudConfig(){const cfg=cloudMonitorConfig(),device=ensureLedgerDevice();return cfg.configured?{url:cfg.url,deviceId:device.deviceId,deviceToken:device.token}:null;}
+export async function reconcileLedgerMutations(limit=50){
+ const cfg=cloudMonitorConfig();if(!cfg.configured)return {ok:false,skipped:true};
+ const rows=await call(`/v1/ledger/mutations?status=pending&limit=${Math.max(1,Math.min(100,Number(limit)||50))}`);const results=[];
+ for(const row of Array.isArray(rows)?rows:[]){
+  try{const result=applyLedgerMutation(row);await call(`/v1/ledger/mutations/${encodeURIComponent(row.mutationId)}`,{method:'PATCH',body:JSON.stringify({status:'applied',result})});results.push({mutationId:row.mutationId,status:'applied',alreadyApplied:result.alreadyApplied});}
+  catch(e){const reason=String(e?.message||e).slice(0,1000);try{await call(`/v1/ledger/mutations/${encodeURIComponent(row.mutationId)}`,{method:'PATCH',body:JSON.stringify({status:'rejected',reason})});results.push({mutationId:row.mutationId,status:'rejected',reason});}catch(ackError){results.push({mutationId:row.mutationId,status:'ack_failed',reason,ackError:String(ackError?.message||ackError)});}}
+ }
+ return {ok:results.every(x=>x.status!=='ack_failed'),count:results.length,results};
+}
+
 export async function fetchCloudEvents(){
  const x=await call('/v1/monitor/events');
  return Array.isArray(x)?x:[];
@@ -186,7 +202,7 @@ export function directCommandToUpdateText(command){
 export async function syncGptBridgeState(){
  const cfg=cloudMonitorConfig();if(!cfg.configured)return {ok:false,configured:false,skipped:true};
  try{
-  const out=await call('/v1/gpt-bridge/state',{method:'PUT',body:JSON.stringify({sourceVersion:'0.3.18',state:buildGptBridgeSnapshot()})});
+  const out=await call('/v1/gpt-bridge/state',{method:'PUT',body:JSON.stringify({sourceVersion:'0.3.19',state:buildGptBridgeSnapshot()})});
   gptDirectRuntime.lastStateSyncAt=new Date().toISOString();gptDirectRuntime.lastError=null;return out;
  }catch(e){gptDirectRuntime.lastError=String(e?.message||e);throw e}
 }

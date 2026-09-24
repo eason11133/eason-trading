@@ -82,7 +82,7 @@ function migrate(x){
    }
   }
  }
- x.setups=x.setups||{};x.setupEvents=x.setupEvents||[];x.hypotheses=x.hypotheses||[];x.closePackages=x.closePackages||[];x.handoffs=x.handoffs||[];x.gptUpdateHistory=x.gptUpdateHistory||[];
+ x.setups=x.setups||{};x.setupEvents=x.setupEvents||[];x.hypotheses=x.hypotheses||[];x.closePackages=x.closePackages||[];x.handoffs=x.handoffs||[];x.gptUpdateHistory=x.gptUpdateHistory||[];x.appliedLedgerMutations=x.appliedLedgerMutations||{};
  // v0.3.8: stock discovery belongs to GPT, not the deterministic app/backend. Remove v0.3.6 research-scanner residue during migration.
  delete x.discoveryRuns;delete x.marketSnapshots;delete x.metadata.discoveryCheckedCalendarDate;delete x.metadata.lastDiscoveryMarketDate;
  for(const cp of x.closePackages){if(!cp||typeof cp!=='object')continue;delete cp.marketDiscovery;if(cp.nightSelection?.mode==='ROLLING_POOL_PLUS_NEW_DISCOVERY')cp.nightSelection={horizonTradingDays:'5-10',mode:'GPT_RESEARCH_PLUS_ROLLING_POOL',instruction:'保留跨日 rolling Setup；由 GPT 自行查公開市場找新候選，再和舊候選比較。'};}
@@ -123,6 +123,7 @@ function load(){
 }
 export let db=load();
 let marketPersistTimer=null;
+let atomicMutationDepth=0;
 function trimTail(rows,limit){return Array.isArray(rows)&&rows.length>limit?rows.slice(-limit):(rows||[]);}
 function pruneDurableHistory(){
  // Trading ledger and user-authored reviews are never pruned here. High-volume operational history is bounded so state.json stays fast for months of use.
@@ -141,6 +142,7 @@ function pruneDurableHistory(){
  const seen=new Set();db.reviewTriggers=[...active,...closed].filter(x=>!seen.has(x.id)&&(seen.add(x.id),true));
 }
 export function persist(){
+ if(atomicMutationDepth>0)return;
  pruneDurableHistory();
  fs.mkdirSync(path.dirname(file),{recursive:true});
  const tmp=`${file}.tmp-${process.pid}`;
@@ -156,6 +158,11 @@ export function persist(){
   try{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}catch{}
   throw e;
  }
+}
+export function runAtomicLedgerMutation(fn){
+ const before=clone(db);atomicMutationDepth++;
+ try{const value=fn();atomicMutationDepth--;persist();return value;}
+ catch(e){atomicMutationDepth--;db=before;throw e;}
 }
 export function scheduleMarketPersist(delayMs=15000){
  if(marketPersistTimer)return;

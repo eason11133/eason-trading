@@ -6,7 +6,7 @@ export const emptySeed = {
   portfolio: { ...emptyPortfolio },
   positions: [], watchlist: [], market: {}, playbooks: {},
   trades: [], alerts: [], reviews: [], devices: [], disclosureSeen: [], volumeBaselines: {},
-  reviewTriggers: [], triggerEvents: [], triggerSnapshots: [], setups: {}, setupEvents: [], hypotheses: [], closePackages: [], handoffs: [], gptUpdateHistory: [], audit: []
+  reviewTriggers: [], triggerEvents: [], triggerSnapshots: [], setups: {}, setupEvents: [], hypotheses: [], closePackages: [], handoffs: [], gptUpdateHistory: [], appliedLedgerMutations:{}, audit: []
 };
 
 // Legacy fixture only. Production runtime must never start from these values.

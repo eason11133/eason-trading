@@ -14,7 +14,7 @@ import { getCandles } from './candles.mjs';
 import { startDisclosures } from './disclosures.mjs';
 import { marketSession } from './market-session.mjs';
 import { parseQuickTrade } from './quick-trade.mjs';
-import { buildMonitorTargets, syncCloudMonitor, syncCloudDevice, syncAllCloudDevices, reconcileCloudEvents, updateCloudEventStatus, syncReviewEventStatuses, cloudMonitorConfig, syncGptBridgeState, reconcileGptCommands, reconcileGptPingCommand, gptDirectRuntimeStatus } from './cloud-monitor.mjs';
+import { buildMonitorTargets, syncCloudMonitor, syncCloudDevice, syncAllCloudDevices, reconcileCloudEvents, updateCloudEventStatus, syncReviewEventStatuses, cloudMonitorConfig, syncGptBridgeState, reconcileGptCommands, reconcileGptPingCommand, gptDirectRuntimeStatus,registerCloudLedgerDevice,mobileLedgerCloudConfig,reconcileLedgerMutations } from './cloud-monitor.mjs';
 import { createPairingManager } from './pairing.mjs';
 import { apiAuthorized } from './auth.mjs';
 
@@ -103,13 +103,13 @@ http.createServer(async(req,res)=>{
   const u=new URL(req.url||'/',`http://${req.headers.host}`); const p=u.pathname;
   if(req.method==='POST'&&p==='/v1/pairing/claim'){
     const x=await body(req);
-    try{return send(res,200,{ok:true,...pairing.claim(x.code,clientId(req))});}
+    try{return send(res,200,{ok:true,...pairing.claim(x.code,clientId(req)),ledgerCloud:mobileLedgerCloudConfig()});}
     catch(e){const msg=e?.message||'PAIRING_FAILED';return send(res,msg==='PAIRING_RATE_LIMITED'?429:400,{error:msg});}
   }
   if(!auth(req)) return send(res,401,{error:'unauthorized'});
   if(req.method==='POST'&&p==='/v1/pairing/start') return send(res,201,{ok:true,...pairing.start()});
   if(req.method==='GET'&&p==='/v1/pairing/status') return send(res,200,{ok:true,...pairing.status()});
-  if(req.method==='GET'&&p==='/health') { const provider=providerStatus();const active=radar();const hydrated=active.filter(x=>x.dataTrusted).length;const fresh=active.filter(x=>x.dataFresh).length;const quotesReady=provider.verified&&fresh>=active.length;const cloudCfg=cloudMonitorConfig();const cloudTargets=buildMonitorTargets();const cloudReady=cloudTargets.filter(x=>x.cloudReady!==false);const cloudNotReady=cloudTargets.filter(x=>x.cloudReady===false).map(x=>({symbol:x.symbol,missing:x.cloudMissing||[]}));return send(res,200,{ok:true,service:'eason-trading',version:'0.3.18',marketDataConfigured:provider.configured,marketData:'fugle',marketDataVerified:provider.verified,marketDataError:provider.lastError||null,activeSymbols:active.length,hydratedSymbols:hydrated,freshSymbols:fresh,quotesReady,session:marketSession(),ledgerMode:db.metadata?.ledgerMode||'uninitialized',cloudMonitorConfigured:cloudCfg.configured,cloudMonitor:{configured:cloudCfg.configured,armed:cloudTargets.length,ready:cloudReady.length,notReady:cloudNotReady},gptDirect:gptDirectRuntimeStatus(),auditMode}); }
+  if(req.method==='GET'&&p==='/health') { const provider=providerStatus();const active=radar();const hydrated=active.filter(x=>x.dataTrusted).length;const fresh=active.filter(x=>x.dataFresh).length;const quotesReady=provider.verified&&fresh>=active.length;const cloudCfg=cloudMonitorConfig();const cloudTargets=buildMonitorTargets();const cloudReady=cloudTargets.filter(x=>x.cloudReady!==false);const cloudNotReady=cloudTargets.filter(x=>x.cloudReady===false).map(x=>({symbol:x.symbol,missing:x.cloudMissing||[]}));return send(res,200,{ok:true,service:'eason-trading',version:'0.3.19',marketDataConfigured:provider.configured,marketData:'fugle',marketDataVerified:provider.verified,marketDataError:provider.lastError||null,activeSymbols:active.length,hydratedSymbols:hydrated,freshSymbols:fresh,quotesReady,session:marketSession(),ledgerMode:db.metadata?.ledgerMode||'uninitialized',cloudMonitorConfigured:cloudCfg.configured,cloudMonitor:{configured:cloudCfg.configured,armed:cloudTargets.length,ready:cloudReady.length,notReady:cloudNotReady},gptDirect:gptDirectRuntimeStatus(),auditMode}); }
   if(req.method==='GET'&&p==='/v1/market-status'){const provider=providerStatus();return send(res,200,{...marketSession(),marketDataConfigured:provider.configured,marketDataVerified:provider.verified,marketDataError:provider.lastError||null});}
   if(req.method==='POST'&&p==='/v1/cloud-monitor/sync'){
    const completed={};
@@ -204,9 +204,10 @@ http.createServer(async(req,res)=>{
  console.log(`Eason Trading API http://localhost:${port}`);
  try{const p=await verifyProvider();if(!p.verified)console.error(`[fugle] verification failed: ${p.lastError||'unknown error'}`);const x=await bootstrapQuotes();if(x.enabled)console.log(`[scanner] startup hydration scanned ${x.scanned||0}, failed ${x.failed||0}`);}catch(e){console.error('[scanner hydration]',e.message)}
  try{maybeGenerateClosePackage();}catch(e){console.error('[close package]',e.message)}
- try{if(cloudMonitorConfig().configured){await syncReviewEventStatuses();await reconcileCloudEvents();await syncCloudMonitor();await syncAllCloudDevices();await syncGptBridgeState();if(!auditMode)await reconcileGptCommands();console.log(`[cloud monitor] startup reconcile/sync complete${auditMode?' (audit mode: commands held)':''}`)}}catch(e){console.error('[cloud monitor startup sync]',e.message)}
+ try{if(cloudMonitorConfig().configured){await registerCloudLedgerDevice();await reconcileLedgerMutations();await syncReviewEventStatuses();await reconcileCloudEvents();await syncCloudMonitor();await syncAllCloudDevices();await syncGptBridgeState();if(!auditMode)await reconcileGptCommands();console.log(`[cloud monitor] startup reconcile/sync complete${auditMode?' (audit mode: commands held)':''}`)}}catch(e){console.error('[cloud monitor startup sync]',e.message)}
  setInterval(()=>{try{maybeGenerateClosePackage();}catch(e){console.error('[close package]',e.message)}},60_000);
  setInterval(()=>{if(cloudMonitorConfig().configured)Promise.all([syncReviewEventStatuses(),reconcileCloudEvents(),syncCloudMonitor()]).catch(e=>console.error('[cloud monitor reconcile/sync]',e.message));},60_000);
  setInterval(()=>{if(cloudMonitorConfig().configured){if(auditMode)syncGptBridgeState().catch(e=>console.error('[gpt direct state sync]',e.message));else Promise.all([reconcileGptCommands(),syncGptBridgeState()]).catch(e=>console.error('[gpt direct reconcile/sync]',e.message));}},15_000);
+ setInterval(()=>{if(cloudMonitorConfig().configured)reconcileLedgerMutations().catch(e=>console.error('[ledger mutation sync]',e.message));},10_000);
  startScanner({skipBootstrap:true});createFocusStream().start();startDisclosures();
 });

@@ -2,7 +2,7 @@ import { advanceSmartTrigger, evaluateSmartTrigger, normalizeSmartConditions, no
 const FUGLE='https://api.fugle.tw/marketdata/v1.0/stock';
 const cors={
  'access-control-allow-origin':'*',
- 'access-control-allow-headers':'content-type,x-api-key,authorization,mcp-protocol-version,mcp-method,mcp-name',
+ 'access-control-allow-headers':'content-type,x-api-key,x-device-id,x-device-token,authorization,mcp-protocol-version,mcp-method,mcp-name',
  'access-control-allow-methods':'GET,PUT,POST,PATCH,OPTIONS'
 };
 const json=(x,status=200)=>new Response(status===204?null:JSON.stringify(x),{status,headers:{'content-type':'application/json; charset=utf-8',...cors}});
@@ -11,6 +11,39 @@ const uid=p=>`${p}_${Date.now()}_${Math.random().toString(36).slice(2,7)}`;
 export const cloudAuthorized=(provided,configured)=>String(configured||'').length>=20&&String(provided||'')===String(configured);
 const auth=(req,env)=>cloudAuthorized(req.headers.get('x-api-key'),env.TRADING_API_KEY);
 const parse=x=>{try{return JSON.parse(x)}catch{return null}};
+const hex=bytes=>[...new Uint8Array(bytes)].map(x=>x.toString(16).padStart(2,'0')).join('');
+const tokenHash=async token=>hex(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(String(token||''))));
+const LEDGER_TYPES=new Set(['POSITION_ADD','POSITION_ADJUST','POSITION_REMOVE','CASH_SET','TRADE_RECORD']);
+const safeLedgerMutation=r=>r?({mutationId:r.mutation_id,deviceId:r.device_id,createdAt:r.created_at,clientSequence:Number(r.client_sequence),idempotencyKey:r.idempotency_key,schemaVersion:Number(r.schema_version),mutationType:r.mutation_type,payload:parse(r.payload),status:r.status,applyResult:parse(r.apply_result),rejectionReason:r.rejection_reason||null,appliedAt:r.applied_at||null}):null;
+async function deviceAuthorized(req,env){const id=String(req.headers.get('x-device-id')||''),token=String(req.headers.get('x-device-token')||'');if(!id||token.length<32)return null;const row=await one(env,'SELECT device_id,token_hash,enabled FROM ledger_devices WHERE device_id=?',id);return row&&row.enabled===1&&row.token_hash===await tokenHash(token)?id:null;}
+export async function ledgerMutationRoutes(req,env,u,p){
+ if(req.method==='POST'&&p==='/v1/ledger/devices'){
+  if(!auth(req,env))return json({error:'unauthorized'},401);const x=await req.json(),id=String(x.deviceId||''),token=String(x.token||'');if(!id||token.length<32)return json({error:'invalid device'},400);const ts=now();
+  await env.DB.prepare('INSERT INTO ledger_devices(device_id,token_hash,enabled,created_at,updated_at) VALUES(?,?,1,?,?) ON CONFLICT(device_id) DO UPDATE SET token_hash=excluded.token_hash,enabled=1,updated_at=excluded.updated_at').bind(id,await tokenHash(token),ts,ts).run();return json({ok:true,deviceId:id},201);
+ }
+ if(req.method==='GET'&&p==='/v1/ledger/mutations'){
+  if(auth(req,env)){const status=String(u.searchParams.get('status')||'pending'),limit=Math.max(1,Math.min(100,Number(u.searchParams.get('limit')||50)));return json((await all(env,'SELECT * FROM ledger_mutations WHERE status=? ORDER BY created_at ASC,device_id ASC,client_sequence ASC,mutation_id ASC LIMIT ?',status,limit)).map(safeLedgerMutation));}
+  const deviceId=await deviceAuthorized(req,env);if(!deviceId)return json({error:'unauthorized'},401);const rows=await all(env,'SELECT * FROM ledger_mutations WHERE device_id=? ORDER BY created_at DESC LIMIT 100',deviceId);return json(rows.map(safeLedgerMutation));
+ }
+ if(req.method==='POST'&&p==='/v1/ledger/mutations'){
+  const deviceId=await deviceAuthorized(req,env);if(!deviceId)return json({error:'unauthorized'},401);const x=await req.json();
+  if(x.schemaVersion!==1||!LEDGER_TYPES.has(x.mutationType)||!/^lm_[A-Za-z0-9_-]{8,}$/.test(String(x.mutationId||''))||!Number.isSafeInteger(x.clientSequence)||x.clientSequence<1||!x.payload||typeof x.payload!=='object')return json({error:'malformed mutation'},400);
+  const canonical=JSON.stringify(x.payload),key=String(x.idempotencyKey||x.mutationId),ts=now();
+  const prior=await one(env,'SELECT * FROM ledger_mutations WHERE mutation_id=? OR (device_id=? AND idempotency_key=?)',x.mutationId,deviceId,key);
+  if(prior){if(prior.device_id!==deviceId||prior.mutation_type!==x.mutationType||prior.payload!==canonical)return json({error:'idempotency conflict'},409);return json({ok:true,durable:true,mutation:safeLedgerMutation(prior)},200);}
+  try{await env.DB.prepare("INSERT INTO ledger_mutations(mutation_id,device_id,client_sequence,idempotency_key,schema_version,mutation_type,payload,status,created_at) VALUES(?,?,?,?,?,?,?,'pending',?)").bind(x.mutationId,deviceId,x.clientSequence,key,1,x.mutationType,canonical,ts).run();}
+  catch(e){return json({error:'sequence conflict'},409)}
+  return json({ok:true,durable:true,mutation:safeLedgerMutation(await one(env,'SELECT * FROM ledger_mutations WHERE mutation_id=?',x.mutationId))},202);
+ }
+ if(req.method==='GET'&&/^\/v1\/ledger\/mutations\/[^/]+$/.test(p)){
+  const id=decodeURIComponent(p.split('/')[4]),row=await one(env,'SELECT * FROM ledger_mutations WHERE mutation_id=?',id);if(!row)return json({error:'not found'},404);if(!auth(req,env)){const deviceId=await deviceAuthorized(req,env);if(!deviceId||row.device_id!==deviceId)return json({error:'unauthorized'},401);}return json(safeLedgerMutation(row));
+ }
+ if(req.method==='PATCH'&&/^\/v1\/ledger\/mutations\/[^/]+$/.test(p)){
+  if(!auth(req,env))return json({error:'unauthorized'},401);const id=decodeURIComponent(p.split('/')[4]),x=await req.json();if(!['applied','rejected'].includes(x.status))return json({error:'invalid status'},400);const row=await one(env,'SELECT * FROM ledger_mutations WHERE mutation_id=?',id);if(!row)return json({error:'not found'},404);if(row.status!=='pending')return json(safeLedgerMutation(row));
+  await env.DB.prepare('UPDATE ledger_mutations SET status=?,applied_at=?,apply_result=?,rejection_reason=? WHERE mutation_id=? AND status=\'pending\'').bind(x.status,x.status==='applied'?now():null,JSON.stringify(x.result||null),x.status==='rejected'?String(x.reason||'rejected').slice(0,1000):null,id).run();return json(safeLedgerMutation(await one(env,'SELECT * FROM ledger_mutations WHERE mutation_id=?',id)));
+ }
+ return null;
+}
 const tp=(date=new Date())=>Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Taipei',hour:'2-digit',minute:'2-digit',weekday:'short',hourCycle:'h23'}).formatToParts(date).filter(x=>x.type!=='literal').map(x=>[x.type,x.value]));
 const taipeiDate=(date=new Date())=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).format(date);
 export function fugleQuoteFreshness(q,at=new Date()){
@@ -308,7 +341,7 @@ async function callDirectGptTool(env,name,args={}){
 
 
 export function gptActionOpenApi(origin='https://YOUR_WORKER.workers.dev'){
- return {openapi:'3.1.0',info:{title:'Eason Trading Direct Strategy API',version:'0.3.18',description:'Read Eason Trading strategy state and queue strategy-only updates. This API cannot modify cash, executed trades, or holding quantities.'},externalDocs:{description:'Eason Trading GPT Action usage instructions',url:String(origin).replace(/\/$/,'')+'/gpt-action-instructions.txt'},servers:[{url:String(origin).replace(/\/$/,'')}],components:{securitySchemes:{bearerAuth:{type:'http',scheme:'bearer',bearerFormat:'opaque'}}},security:[{bearerAuth:[]}],paths:{
+ return {openapi:'3.1.0',info:{title:'Eason Trading Direct Strategy API',version:'0.3.19',description:'Read Eason Trading strategy state and queue strategy-only updates. This API cannot modify cash, executed trades, or holding quantities.'},externalDocs:{description:'Eason Trading GPT Action usage instructions',url:String(origin).replace(/\/$/,'')+'/gpt-action-instructions.txt'},servers:[{url:String(origin).replace(/\/$/,'')}],components:{securitySchemes:{bearerAuth:{type:'http',scheme:'bearer',bearerFormat:'opaque'}}},security:[{bearerAuth:[]}],paths:{
   '/v1/gpt-action/readiness':{get:{operationId:'checkEasonTradingConnection',summary:'Check whether Eason Trading is synced and whether the local app is online',responses:{'200':{description:'Connection readiness and pending command counts'}}}},
   '/v1/gpt-action/state':{get:{operationId:'getTradingState',summary:'Read current Eason Trading strategy state',description:'Call this before material strategy analysis so the answer uses the latest App state.',responses:{'200':{description:'Latest synced read-only state'}}}},
   '/v1/gpt-action/stocks/{symbol}':{get:{operationId:'getStockStrategy',summary:'Read one stock strategy',parameters:[{name:'symbol',in:'path',required:true,schema:symbolSchema}],responses:{'200':{description:'Stock strategy context'}}}},
@@ -342,8 +375,8 @@ export async function handleMcp(req,env){
  if(!mcpAuthorized(req,env))return json({error:'unauthorized'},401);
  let msg;try{msg=await req.json()}catch{return json({error:'invalid json'},400)}
  const id=msg?.id??null,method=String(msg?.method||'');
- if(method==='initialize')return mcpRpc(id,{protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'eason-trading-direct',version:'0.3.18'}});
- if(method==='server/discover')return mcpRpc(id,{protocolVersion:'2026-07-28',capabilities:{tools:{}},serverInfo:{name:'eason-trading-direct',version:'0.3.18'}});
+ if(method==='initialize')return mcpRpc(id,{protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'eason-trading-direct',version:'0.3.19'}});
+ if(method==='server/discover')return mcpRpc(id,{protocolVersion:'2026-07-28',capabilities:{tools:{}},serverInfo:{name:'eason-trading-direct',version:'0.3.19'}});
  if(method==='notifications/initialized')return new Response(null,{status:202,headers:cors});
  if(method==='tools/list')return mcpRpc(id,{resultType:'complete',tools:directGptToolDefinitions()});
  if(method==='tools/call'){
@@ -361,12 +394,13 @@ async function handle(req,env){
  if(req.method==='GET'&&p==='/gpt-action-openapi.json')return json(gptActionOpenApi(u.origin));
  if(p.startsWith('/v1/gpt-action/'))return handleGptAction(req,env,u,p);
  if(req.method==='POST'&&p==='/mcp')return handleMcp(req,env);
+ if(p.startsWith('/v1/ledger/')){const ledger=await ledgerMutationRoutes(req,env,u,p);if(ledger)return ledger;}
  if(req.method==='GET'){
   const pub=await publicEvent(req,env,u,p);if(pub)return pub;
  }
  if(!auth(req,env))return json({error:'unauthorized'},401);
  const gptBridge=await gptBridgeRoutes(req,env,u,p);if(gptBridge)return gptBridge;
- if(p==='/health'){const devices=await one(env,'SELECT COUNT(*) AS c FROM devices WHERE enabled=1');const pendingPush=await one(env,"SELECT COUNT(*) AS c FROM monitor_events WHERE review_status='PENDING' AND push_status!='SENT'");return json({ok:true,service:'eason-trading-cloud-monitor',version:'0.3.18',monitorOnly:true,directGptBridge:true,mcpBearerConfigured:String(env.MCP_BEARER_TOKEN||'').length>=20,publicBaseConfigured:!!env.PUBLIC_BASE_URL,enabledDevices:Number(devices?.c||0),pendingPush:Number(pendingPush?.c||0)});}
+ if(p==='/health'){const devices=await one(env,'SELECT COUNT(*) AS c FROM devices WHERE enabled=1');const pendingPush=await one(env,"SELECT COUNT(*) AS c FROM monitor_events WHERE review_status='PENDING' AND push_status!='SENT'");return json({ok:true,service:'eason-trading-cloud-monitor',version:'0.3.19',monitorOnly:true,directGptBridge:true,mcpBearerConfigured:String(env.MCP_BEARER_TOKEN||'').length>=20,publicBaseConfigured:!!env.PUBLIC_BASE_URL,enabledDevices:Number(devices?.c||0),pendingPush:Number(pendingPush?.c||0)});}
  if(req.method==='PUT'&&p==='/v1/monitor/targets')return syncTargets(req,env);
  if(req.method==='GET'&&p==='/v1/monitor/targets')return json(await all(env,'SELECT * FROM monitor_targets ORDER BY synced_at DESC'));
  if(req.method==='GET'&&p==='/v1/monitor/events'){
