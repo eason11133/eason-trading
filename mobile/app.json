@@ -2,13 +2,13 @@
   "expo": {
     "name": "Eason Trading",
     "slug": "eason-trading",
-    "version": "0.3.18",
+    "version": "0.3.19",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "android": {
       "package": "com.eason.trading",
       "googleServicesFile": "./google-services.json",
-      "versionCode": 318
+      "versionCode": 319
     },
     "ios": {
       "bundleIdentifier": "com.eason.trading",
@@ -21,7 +21,7 @@
           "NSAllowsLocalNetworking": true
         }
       },
-      "buildNumber": "318"
+      "buildNumber": "319"
     },
     "plugins": [
       "expo-notifications",
@@ -36,7 +36,7 @@
       ]
     ],
     "extra": {
-      "internalVersion": "0.3.18",
+      "internalVersion": "0.3.19",
       "eas": {
         "projectId": "f98e196e-d149-42f8-b7c2-ccb887d60080"
       }

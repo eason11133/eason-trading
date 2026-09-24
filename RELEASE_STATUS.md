@@ -1,4 +1,6 @@
-# Eason Trading v0.3.18 — quiet monitor + after-close GPT bridge
+# Eason Trading v0.3.19 — PC-off mobile Ledger queue
+
+v0.3.19 adds durable mobile-to-Cloud Ledger mutation transport. The local Ledger remains the single authority; Cloud records pending/apply/reject state only. The backend polls without blocking readiness, applies each mutation once using a durable local index, rejects stale/malformed input, and retries acknowledgements safely. The v0.3.18 FINAL-R3 tag remains unchanged as the rollback baseline.
 
 ## Release focus
 

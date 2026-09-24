@@ -240,3 +240,10 @@ The source repository contains placeholders and setup instructions only. Actual 
 | Duplicate GPT response | Normalized-payload hashing makes re-application idempotent. |
 | Invalid GPT write | Cloud schema/forbidden-key checks or local validation reject it; command becomes `FAILED`; Ledger fields remain unchanged. |
 | Production audit | `EASON_AUDIT_MODE=1` holds unrelated pending commands while a specific non-mutating `PING` is verified. |
+# v0.3.19 PC-off Ledger mutation path
+
+`Mobile → authenticated Cloud queue → local backend validator → authoritative local Ledger → Cloud acknowledgement`
+
+The D1 `ledger_mutations` table is an immutable-input transport queue with `pending`, `applied`, and `rejected` lifecycle fields. Stable ordering is `created_at`, `device_id`, `client_sequence`, then `mutation_id`. Mobile retries reuse one mutation/idempotency key within a submission. The backend persists the Ledger change and its applied-mutation record atomically; if acknowledgement is lost, replay returns the durable prior result and uploads the acknowledgement again.
+
+Cloud never derives or exposes an authoritative portfolio from queued writes. Monitoring/GPT state remains a non-authoritative display/strategy replica. Device queue credentials are provisioned during authenticated local pairing and are distinct from the Cloud administrative key and GPT bearer token.

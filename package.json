@@ -10,5 +10,5 @@
     "server": "npm --workspace server run dev",
     "test": "npm --workspace server test"
   },
-  "version": "0.3.18"
+  "version": "0.3.19"
 }

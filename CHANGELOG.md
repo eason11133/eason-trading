@@ -416,3 +416,9 @@
 - Final builder now invokes pinned EAS CLI commands directly, waits for the Android preview build to complete, and verifies the latest finished v0.3.18 preview build.
 - Pinned legacy EAS setup/push-build helpers to 24.3.0 as well; no operational EAS script uses `@latest`.
 - Release contract now rejects `$Args`/`@Args` forwarding in the Android builder and rejects drifting `eas-cli@latest` in operational scripts.
+# 0.3.19
+
+- Added a durable, authenticated Cloud transport queue for all mobile Ledger mutations.
+- Added deterministic ordering, idempotent local apply records, conflict rejection, and retry-safe Cloud acknowledgement.
+- Mobile add/edit/delete holding, cash corrections, and executed trades now work while the PC is off and clearly show “待同步”.
+- Added D1 migration `0005_ledger_mutation_queue.sql`; Cloud remains non-authoritative and GPT remains strategy-only.

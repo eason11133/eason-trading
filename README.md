@@ -4,7 +4,13 @@ Eason Trading is a personal decision-support system for a workflow that already 
 
 **GPT reasons about strategy. The local backend owns authoritative trading truth. Cloudflare provides PC-off monitoring and event delivery. A shared deterministic trigger engine turns strategy into executable rules while preventing AI from changing cash, executed trades, or holding quantities.**
 
-> **Current baseline:** v0.3.18 FINAL-R3. The immutable production tag is [`v0.3.18-final-r3`](https://github.com/eason11133/eason-trading/tree/v0.3.18-final-r3).
+> **Current release target:** v0.3.19. The immutable prior production tag [`v0.3.18-final-r3`](https://github.com/eason11133/eason-trading/tree/v0.3.18-final-r3) remains the rollback baseline.
+
+## PC-off mobile Ledger writes
+
+Normal mobile Ledger actions do not require the PC to remain online. Add/edit/remove holding, cash correction, and executed buy/sell records are authenticated and durably appended to a Cloud queue. The phone reports **已提交，待同步**—never “completed”—until the local backend reconnects, validates the mutation, applies it exactly once, and acknowledges `applied` or `rejected`.
+
+Cloud is transport, not a portfolio database: queued payloads and lifecycle status are non-authoritative. Cash, positions, trades, and all final Ledger truth remain in the local state. A durable local applied-mutation index prevents replay after crashes or lost acknowledgements; position/cash preconditions reject stale corrections instead of guessing. GPT uses a separate strategy-only API and has no route or credential that can enqueue Ledger mutations.
 
 ## Why I built this
 

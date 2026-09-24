@@ -20,6 +20,6 @@ try {
   if($LASTEXITCODE -ne 0){throw "Pinned EAS CLI 24.3.0 Android build failed."}
 
   Write-Host "Latest finished v0.3.18 Android preview build:" -ForegroundColor Green
-  & $Npx --yes eas-cli@24.3.0 build:list --platform android --build-profile preview --app-version 0.3.18 --status finished --limit 1 --non-interactive
+  & $Npx --yes eas-cli@24.3.0 build:list --platform android --build-profile preview --app-version 0.3.19 --status finished --limit 1 --non-interactive
   if($LASTEXITCODE -ne 0){throw "EAS build finished, but build:list verification failed."}
 } finally { Pop-Location }
