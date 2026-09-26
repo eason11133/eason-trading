@@ -19,6 +19,9 @@ import { configurePush, subscribeNotificationResponses } from './src/push';
 import type { PushSetupResult } from './src/push';
 import { connectFocus } from './src/focus';
 import { candleCacheFresh, getCachedCandles, putCachedCandles } from './src/candleCache';
+import {getConnection,initializeConnection} from './src/connection';
+import {deriveMobileConnectionState} from './src/pairingState';
+import type {MobileConnectionState} from './src/pairingState';
 import type { AppSettings, Candle, ChartMode, ClosePackage, HealthStatus, Portfolio, RadarAlert, ReviewInboxEvent, SetupStage, StockContext, StockSnapshot, TradeSide } from './src/types/trading';
 
 const C = { bg:'#050B11', card:'#0B1620', card2:'#0E1C28', border:'#20303E', text:'#F4F7FA', muted:'#8DA0B4', green:'#35D99A', red:'#FF5B67', yellow:'#F4B740', blue:'#62A9FF' };
@@ -50,17 +53,27 @@ export default function App() {
   const [pairingOpen,setPairingOpen]=useState(false);
   const [chatSettingsOpen,setChatSettingsOpen]=useState(false);
   const [banner,setBanner]=useState<RadarAlert|null>(null);
-  const [backendError,setBackendError]=useState('');
+  const [connectionState,setConnectionState]=useState<MobileConnectionState|null>(null);
   const alertCursor=useRef<string|null>(null);
   const alive=useRef(true);
   const lastGptClipboard=useRef('');
+  const deviceCredentialsConfirmed=useRef(false);
 
   const refresh=useCallback(async()=>{
-    const [r,b,h,cp,st,ri]=await Promise.allSettled([fetchRadar(),fetchFounderBrief(),fetchHealth(),fetchLatestClosePackage(),fetchSettings(),fetchReviewInbox()]);
+    const connection=await initializeConnection().catch(()=>getConnection());
     if(!alive.current)return;
+    if(deriveMobileConnectionState(connection,false)==='UNPAIRED'){
+      setConnectionState('UNPAIRED');setHealth(null);return;
+    }
+    const deviceCredentialProbe=deviceCredentialsConfirmed.current?Promise.resolve([]):fetchLedgerMutationStatuses();
+    const [r,b,h,cp,st,ri,deviceCredentials]=await Promise.allSettled([fetchRadar(),fetchFounderBrief(),fetchHealth(),fetchLatestClosePackage(),fetchSettings(),fetchReviewInbox(),deviceCredentialProbe]);
+    if(!alive.current)return;
+    const authInvalid=[h,deviceCredentials].some(x=>x.status==='rejected'&&String((x as PromiseRejectedResult).reason?.message||'')==='PAIRING_INVALID');
+    if(authInvalid){setConnectionState('UNPAIRED');setHealth(null);return;}
+    if(deviceCredentials.status==='fulfilled')deviceCredentialsConfirmed.current=true;
     if(r.status==='fulfilled')setStocks(r.value);
     if(b.status==='fulfilled'&&b.value?.portfolio)setPortfolio(b.value.portfolio);
-    if(h.status==='fulfilled'){setHealth(h.value);setBackendError('');}else setBackendError(String((h as PromiseRejectedResult).reason?.message||'')==='PAIRING_REQUIRED'?'尚未連接電腦':'Backend 無法連線，畫面可能是上次資料');
+    if(h.status==='fulfilled'){setHealth(h.value);setConnectionState('PAIRED_AND_ONLINE');}else setConnectionState(deriveMobileConnectionState(getConnection(),'UNREACHABLE'));
     if(cp.status==='fulfilled')setClosePackage(cp.value);
     if(st.status==='fulfilled')setSettings(st.value);
     if(ri.status==='fulfilled')setReviewInbox(ri.value as ReviewInboxEvent[]);
@@ -158,7 +171,7 @@ export default function App() {
 
   return <SafeAreaProvider><SafeAreaView style={s.safe} edges={['top','right','bottom','left']}><StatusBar barStyle="light-content" />
     {banner&&<AlertBanner alert={banner} onPress={openAlert} onClose={()=>setBanner(null)}/>}
-    {backendError==='尚未連接電腦'?<TouchableOpacity style={s.backendError} onPress={()=>setPairingOpen(true)}><View style={{flex:1}}><Text style={s.backendErrorTitle}>尚未連接電腦</Text><Text style={s.backendErrorSub}>首次使用請完成一次配對；不是資料被刪除</Text></View><Text style={s.backendErrorAction}>開始配對</Text></TouchableOpacity>:backendError?<View style={[s.backendError,s.backendOffline]}><View style={{flex:1}}><Text style={[s.backendErrorTitle,s.backendOfflineTitle]}>電腦目前離線</Text><Text style={[s.backendErrorSub,s.backendOfflineSub]}>本機資料暫停更新；雲端監控與待同步提交仍可使用</Text></View></View>:null}
+    {connectionState==='UNPAIRED'?<TouchableOpacity style={s.backendError} onPress={()=>setPairingOpen(true)}><View style={{flex:1}}><Text style={s.backendErrorTitle}>尚未完成手機配對</Text><Text style={s.backendErrorSub}>第一次設定需要和電腦配對一次。</Text></View><Text style={s.backendErrorAction}>開始配對</Text></TouchableOpacity>:connectionState==='PAIRED_BUT_PC_OFFLINE'?<View style={[s.backendError,s.backendOffline]}><View style={{flex:1}}><Text style={[s.backendErrorTitle,s.backendOfflineTitle]}>電腦目前離線</Text><Text style={[s.backendErrorSub,s.backendOfflineSub]}>本機資料暫停更新；雲端監控與待同步提交仍可使用</Text></View></View>:null}
     {selected?<StockDetail stock={selected} onBack={()=>setSelectedSymbol(null)} onChanged={refresh} onHandoff={launchHandoff} />:<>
       <View style={s.body}>
         {tab==='首頁'?<Home stocks={stocks} health={health} closePackage={closePackage} reviewInbox={reviewInbox} onOpen={x=>setSelectedSymbol(x.symbol)} onHandoff={launchHandoff} onCloseReview={reviewClose} onMonitoring={()=>setTab('監控')}/>

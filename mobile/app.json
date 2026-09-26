@@ -8,7 +8,7 @@
     "android": {
       "package": "com.eason.trading",
       "googleServicesFile": "./google-services.json",
-      "versionCode": 320
+      "versionCode": 321
     },
     "ios": {
       "bundleIdentifier": "com.eason.trading",
