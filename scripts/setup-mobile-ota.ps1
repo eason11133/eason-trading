@@ -36,9 +36,24 @@ Set-Location $repoRoot
 $statusLines = @(git status --porcelain)
 if ($LASTEXITCODE -ne 0) { throw "git status failed with exit code $LASTEXITCODE" }
 if ($statusLines.Count -gt 0) {
-  Write-Host "Working tree changes:" -ForegroundColor Yellow
+  $allowedDirty = @(
+    'mobile/package.json',
+    'package-lock.json',
+    'mobile/app.json',
+    'mobile/eas.json'
+  )
+  $unexpectedDirty = @()
+  foreach ($line in $statusLines) {
+    $path = ($line.Substring(3)).Trim()
+    if ($path -notin $allowedDirty) { $unexpectedDirty += $line }
+  }
+  if ($unexpectedDirty.Count -gt 0) {
+    Write-Host "Unexpected working tree changes:" -ForegroundColor Yellow
+    $unexpectedDirty | ForEach-Object { Write-Host $_ }
+    throw "Working tree contains changes outside the OTA setup files. Stop here so existing work is not overwritten."
+  }
+  Write-Host "Resuming expected OTA setup changes:" -ForegroundColor Yellow
   $statusLines | ForEach-Object { Write-Host $_ }
-  throw "Working tree is not clean. Stop here so existing work is not overwritten."
 }
 
 Write-Host "=== Sync main ===" -ForegroundColor Cyan
@@ -51,18 +66,24 @@ Write-Host "HEAD: $head"
 Write-Host ""
 Write-Host "=== Install expo-updates with Expo SDK resolver ===" -ForegroundColor Cyan
 Set-Location $mobile
-& $npxCmd expo install expo-updates
-Assert-LastExit 'expo install expo-updates'
+$updatesInstalled = node -e "const p=require('./package.json'); process.stdout.write(p.dependencies && p.dependencies['expo-updates'] ? 'yes' : 'no')"
+Assert-LastExit 'check expo-updates dependency'
+if ($updatesInstalled -ne 'yes') {
+  & $npxCmd expo install expo-updates
+  Assert-LastExit 'expo install expo-updates'
+} else {
+  Write-Host "expo-updates already present; keeping the resolved SDK-compatible version."
+}
 
 Write-Host ""
 Write-Host "=== Configure EAS Update ===" -ForegroundColor Cyan
 $nodeScript = @'
 const fs = require('fs');
 
-const appPath = process.argv[1];
-const easPath = process.argv[2];
-const projectId = process.argv[3];
-const expectedVersionCode = Number(process.argv[4]);
+const appPath = process.argv[2];
+const easPath = process.argv[3];
+const projectId = process.argv[4];
+const expectedVersionCode = Number(process.argv[5]);
 
 const app = JSON.parse(fs.readFileSync(appPath, 'utf8'));
 if (!app.expo) throw new Error('app.json missing expo');
@@ -98,8 +119,9 @@ Remove-Item $tmpJs -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host "=== Validate resolved config ===" -ForegroundColor Cyan
-$resolved = & $npxCmd expo config --type public --json
+$resolvedLines = @(& $npxCmd expo config --type public --json)
 Assert-LastExit 'expo config'
+$resolved = $resolvedLines -join [Environment]::NewLine
 $cfg = $resolved | ConvertFrom-Json
 if ($cfg.version -ne '0.3.19') { throw "Resolved version mismatch" }
 if ($cfg.android.package -ne 'com.eason.trading') { throw "Resolved package mismatch" }
