@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Text, View } from 'react-native';
 import Svg, { G, Line, Polygon, Polyline, Rect, Text as SvgText } from 'react-native-svg';
+import { humanizeTradingText } from '../presentation';
 import type { Candle, TradeMarker } from '../types/trading';
 
 type Props={
@@ -15,17 +16,17 @@ const PRICE_H=248,VOL_H=54,AXIS_H=24,TOTAL_H=PRICE_H+VOL_H+AXIS_H;
 
 function levels(p:Props):Level[]{
  const out:Level[]=[];
- if(p.breakout)out.push({id:'breakout',price:p.breakout,label:`突破 ${p.breakout}`,color:WHITE});
- if(p.invalid)out.push({id:'invalid',price:p.invalid,label:`失效 ${p.invalid}`,color:RED});
+ if(p.breakout)out.push({id:'breakout',price:p.breakout,label:`觀察價 ${p.breakout}`,color:WHITE});
+ if(p.invalid)out.push({id:'invalid',price:p.invalid,label:`跌到要重看 ${p.invalid}`,color:RED});
  if(p.averageCost)out.push({id:'cost',price:p.averageCost,label:`成本 ${p.averageCost}`,color:BLUE});
- if(p.target1)out.push({id:'target1',price:p.target1,label:`第一收割 ${p.target1}`,color:GREEN});
- if(p.target2)out.push({id:'target2',price:p.target2,label:`主目標 ${p.target2}`,color:GREEN});
- if(p.maxEntry)out.push({id:'maxEntry',price:p.maxEntry,label:`最高追價 ${p.maxEntry}`,color:YELLOW});
- if(p.reviewTriggerPrice&&p.reviewTriggerPrice!==p.breakout)out.push({id:'review',price:p.reviewTriggerPrice,label:`${p.reviewTriggerLabel||'GPT複判'} ${p.reviewTriggerPrice}`,color:YELLOW});
+ if(p.target1)out.push({id:'target1',price:p.target1,label:`第一目標 ${p.target1}`,color:GREEN});
+ if(p.target2)out.push({id:'target2',price:p.target2,label:`主要目標 ${p.target2}`,color:GREEN});
+ if(p.maxEntry)out.push({id:'maxEntry',price:p.maxEntry,label:`不再追高 ${p.maxEntry}`,color:YELLOW});
+ if(p.reviewTriggerPrice&&p.reviewTriggerPrice!==p.breakout)out.push({id:'review',price:p.reviewTriggerPrice,label:`${humanizeTradingText(p.reviewTriggerLabel)||'重新確認'} ${p.reviewTriggerPrice}`,color:YELLOW});
  return out;
 }
 function StrategyStrip({items,goodZone}:{items:Level[];goodZone?:[number,number]}){
- const chips=[...(goodZone?[{id:'good',label:`好價 ${goodZone[0]}–${goodZone[1]}`,color:GREEN}]:[]),...items.filter(x=>x.id!=='cost').map(x=>({id:x.id,label:x.label,color:x.color}))];
+ const chips=[...(goodZone?[{id:'good',label:`留意區間 ${goodZone[0]}–${goodZone[1]}`,color:GREEN}]:[]),...items.filter(x=>x.id!=='cost').map(x=>({id:x.id,label:x.label,color:x.color}))];
  if(!chips.length)return null;
  return <View style={{flexDirection:'row',flexWrap:'wrap',gap:6,paddingHorizontal:12,paddingTop:8}}>{chips.map(x=><View key={x.id} style={{flexDirection:'row',alignItems:'center',gap:5,paddingHorizontal:7,paddingVertical:4,borderRadius:7,backgroundColor:'#0D1A24'}}><View style={{width:6,height:6,borderRadius:3,backgroundColor:x.color}}/><Text style={{color:'#B9C6D3',fontSize:10,fontWeight:'700'}}>{x.label}</Text></View>)}</View>;
 }
@@ -69,7 +70,7 @@ export function IntradayChart(props:Props){
    <Line x1={left} x2={left+plotW} y1={PRICE_H+4} y2={PRICE_H+4} stroke={GRID} strokeWidth={1}/>
    {rows.map((r,i)=>{const bw=Math.max(.65,plotW/Math.max(1,rows.length)*.72),vh=Math.max(1,(r.volume||0)/maxVol*(VOL_H-10));return <Rect key={`v${i}`} x={x(i)-bw/2} y={PRICE_H+VOL_H-vh} width={bw} height={vh} fill={r.close>=r.open?GREEN:RED} opacity={.62}/>})}
    <SvgText x={left} y={TOTAL_H-5} fill={WHITE} fontSize={9}>價格</SvgText>
-   <SvgText x={left+34} y={TOTAL_H-5} fill={YELLOW} fontSize={9}>均價/VWAP</SvgText>
+   <SvgText x={left+34} y={TOTAL_H-5} fill={YELLOW} fontSize={9}>盤中均價</SvgText>
    <SvgText x={left+plotW-70} y={TOTAL_H-5} fill={MUTED} fontSize={9}>09:00 → 13:30</SvgText>
   </Svg>
   <StrategyStrip items={strategy} goodZone={goodZone}/>

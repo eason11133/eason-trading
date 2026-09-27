@@ -40,14 +40,14 @@ if (-not $listener) {
 $health = $null
 for ($i=0; $i -lt 120; $i++) {
   try { $health = Invoke-RestMethod "http://127.0.0.1:8787/health" -Headers (ApiHeaders) -TimeoutSec 3 } catch { $health = $null }
-  if ($health -and $health.version -ne "0.3.18") { throw "Wrong backend version is listening on port 8787: $($health.version)" }
+  if ($health -and $health.version -ne "0.3.19") { throw "Wrong backend version is listening on port 8787: $($health.version)" }
   # /health becomes available before the asynchronous Fugle verification/hydration finishes.
   # Do not treat the first HTTP 200 as production-ready; wait for provider verification.
   if ($health -and $health.ok -and $health.marketDataVerified -eq $true) { break }
   Start-Sleep -Milliseconds 500
 }
 if (-not $health) { throw "Backend health check failed" }
-if ($health.version -ne "0.3.18") { throw "Wrong backend version is listening on port 8787: $($health.version)" }
+if ($health.version -ne "0.3.19") { throw "Wrong backend version is listening on port 8787: $($health.version)" }
 if ($health.marketDataVerified -ne $true) { throw "Fugle verification did not become ready: $($health.marketDataError)" }
 
 Write-Host ""
