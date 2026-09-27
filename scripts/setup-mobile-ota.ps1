@@ -187,7 +187,7 @@ Assert-LastExit 'git diff --check'
 
 Write-Host ""
 Write-Host "=== OTA diff ===" -ForegroundColor Cyan
-git diff -- mobile/app.json mobile/eas.json mobile/package.json package-lock.json
+git --no-pager diff -- mobile/app.json mobile/eas.json mobile/package.json package-lock.json
 
 Write-Host ""
 Write-Host "=== Commit OTA configuration ===" -ForegroundColor Cyan
