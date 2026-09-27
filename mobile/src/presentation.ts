@@ -19,14 +19,16 @@ export function humanizeTradingText(input?:string|null){
   // Turn raw predicate text into the sentence a user actually needs.
   text=text.replace(/price\s*(>=|<=|>|<)\s*([0-9.]+)(?:\s*\(now\s*([0-9.]+)\))?/ig,(_m,op,rawThreshold,rawNow)=>{
     const threshold=Number(rawThreshold),now=Number(rawNow);
-    if((!Number.isFinite(threshold)||threshold<=0)&&Number.isFinite(now))return `目前價格 ${fmt(now)} 元，這筆提醒需要重新確認`;
+    if((!Number.isFinite(threshold)||threshold<=0)&&Number.isFinite(now))return `當下價格 ${fmt(now)} 元，這筆提醒需要重新確認`;
     const point=fmt(threshold);
-    const current=Number.isFinite(now)?`（目前 ${fmt(now)} 元）`:'';
+    const current=Number.isFinite(now)?`（當下 ${fmt(now)} 元）`:'';
     if(op==='>='||op==='>')return `價格來到我設定的觀察價 ${point} 元以上${current}`;
     return `價格來到我設定的重新確認價 ${point} 元以下${current}`;
   });
 
   text=text
+    .replace(/(?:目前價格|現價)\s*([0-9]+(?:\.[0-9]+)?)\s*元?/g,'當下價格 $1 元')
+    .replace(/(?:目前價格|現價)/g,'當下價格')
     .replace(/失效條件成立/g,'原本的想法可能不再適用')
     .replace(/invalid(?:ation)?/ig,'原本想法可能失效')
     .replace(/\bRVOL\s*([0-9.]+)×?/ig,(_m,n)=>volumeDescription(Number(n))||'成交量狀況')
