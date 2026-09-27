@@ -3,8 +3,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Set-StrictMode -Version Latest
-
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $mobile = Join-Path $repoRoot 'mobile'
 $appJson = Join-Path $mobile 'app.json'
@@ -118,37 +116,43 @@ Assert-LastExit 'OTA config'
 Remove-Item $tmpJs -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
-Write-Host "=== Validate resolved config ===" -ForegroundColor Cyan
+Write-Host "=== Validate OTA config ===" -ForegroundColor Cyan
 $configCheckScript = @'
-const cp = require('child_process');
+const fs = require('fs');
 
-const npx = process.argv[2];
-const projectId = process.argv[3];
+const appPath = process.argv[2];
+const easPath = process.argv[3];
+const pkgPath = process.argv[4];
+const projectId = process.argv[5];
 
-const raw = cp.execFileSync(npx, ['expo','config','--type','public','--json'], {
-  encoding: 'utf8',
-  windowsHide: true
-});
-const cfg = JSON.parse(raw);
+const app = JSON.parse(fs.readFileSync(appPath, 'utf8'));
+const eas = JSON.parse(fs.readFileSync(easPath, 'utf8'));
+const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
 
 function assert(ok, message) {
   if (!ok) throw new Error(message);
 }
 
-assert(cfg.version === '0.3.19', 'Resolved version mismatch');
-assert(cfg.android?.package === 'com.eason.trading', 'Resolved package mismatch');
-assert(Number(cfg.android?.versionCode) === 323, 'Resolved versionCode mismatch');
-assert(cfg.extra?.eas?.projectId === projectId, 'Resolved projectId mismatch');
-assert(cfg.updates?.url === 'https://u.expo.dev/' + projectId, 'Resolved updates.url mismatch');
-assert(cfg.runtimeVersion?.policy === 'nativeVersion', 'Resolved runtimeVersion policy mismatch');
+assert(app.expo?.version === '0.3.19', 'app version mismatch');
+assert(app.expo?.android?.package === 'com.eason.trading', 'Android package mismatch');
+assert(Number(app.expo?.android?.versionCode) === 323, 'versionCode mismatch');
+assert(app.expo?.extra?.eas?.projectId === projectId, 'EAS projectId mismatch');
+assert(app.expo?.updates?.enabled === true, 'expo-updates not enabled');
+assert(app.expo?.updates?.url === 'https://u.expo.dev/' + projectId, 'updates.url mismatch');
+assert(app.expo?.runtimeVersion?.policy === 'nativeVersion', 'runtimeVersion policy mismatch');
+assert(eas.build?.preview?.channel === 'preview', 'preview channel mismatch');
+assert(eas.build?.production?.channel === 'production', 'production channel mismatch');
+assert(eas.build?.preview?.distribution === 'internal', 'preview distribution must remain internal');
+assert(eas.build?.preview?.android?.buildType === 'apk', 'preview Android build must remain APK');
+assert(Boolean(pkg.dependencies?.['expo-updates']), 'expo-updates dependency missing');
 
-process.stdout.write('Resolved config OK: runtimeVersion policy=nativeVersion\n');
+process.stdout.write('OTA config OK: version=0.3.19 versionCode=323 package=com.eason.trading runtimePolicy=nativeVersion previewChannel=preview\n');
 '@
 
-$tmpConfigCheck = Join-Path $env:TEMP 'eason-trading-check-expo-config.cjs'
+$tmpConfigCheck = Join-Path $env:TEMP 'eason-trading-check-ota-config.cjs'
 [System.IO.File]::WriteAllText($tmpConfigCheck, $configCheckScript, [System.Text.UTF8Encoding]::new($false))
-node $tmpConfigCheck $npxCmd $projectId
-Assert-LastExit 'expo config validation'
+node $tmpConfigCheck $appJson $easJson (Join-Path $mobile 'package.json') $projectId
+Assert-LastExit 'OTA config validation'
 Remove-Item $tmpConfigCheck -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
@@ -215,9 +219,18 @@ try {
   Write-Host ""
   Write-Host "=== Prepare proven Firebase archive path ===" -ForegroundColor Cyan
   if (-not (Test-Path $google)) {
-    if (-not (Test-Path $oldGoogle)) { throw "google-services.json not found in current or known-good v0.3.18 runtime." }
-    Copy-Item $oldGoogle $google -Force
+    $googleCandidates = @(
+      $oldGoogle,
+      'D:\Downloads\google-services.json',
+      'C:\Users\eason\Downloads\google-services.json'
+    )
+    $googleSource = $googleCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $googleSource) {
+      throw "google-services.json was not found in the current project or the known safe client-config locations."
+    }
+    Copy-Item $googleSource $google -Force
     $copiedGoogle = $true
+    Write-Host "Using client Firebase config from: $googleSource"
   }
 
   if ($hadEasIgnore) {
@@ -229,14 +242,19 @@ try {
   Add-Content -LiteralPath $easIgnore -Value "!mobile/google-services.json"
 
   Write-Host ""
-  Write-Host "=== Build Android preview 323 (OTA-capable) ===" -ForegroundColor Cyan
+  Write-Host "=== Verify EAS authentication ===" -ForegroundColor Cyan
   Set-Location $mobile
-  & $npxCmd eas build --platform android --profile preview --non-interactive
+  & $npxCmd --yes eas-cli@24.3.0 whoami
+  Assert-LastExit 'EAS authentication'
+
+  Write-Host ""
+  Write-Host "=== Build Android preview 323 (OTA-capable) ===" -ForegroundColor Cyan
+  & $npxCmd --yes eas-cli@24.3.0 build --platform android --profile preview --non-interactive --wait
   Assert-LastExit 'EAS Build'
 
   Write-Host ""
   Write-Host "=== Publish OTA baseline to preview ===" -ForegroundColor Cyan
-  & $npxCmd eas update --channel preview --message "Build 323 OTA baseline" --non-interactive
+  & $npxCmd --yes eas-cli@24.3.0 update --channel preview --message "Build 323 OTA baseline" --non-interactive
   Assert-LastExit 'EAS Update'
 
   Write-Host ""
