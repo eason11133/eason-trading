@@ -32,7 +32,11 @@ function Run-NodeCheck([string]$RelativePath) {
 
 Set-Location $repoRoot
 
-if ((git status --porcelain).Trim()) {
+$statusLines = @(git status --porcelain)
+if ($LASTEXITCODE -ne 0) { throw "git status failed with exit code $LASTEXITCODE" }
+if ($statusLines.Count -gt 0) {
+  Write-Host "Working tree changes:" -ForegroundColor Yellow
+  $statusLines | ForEach-Object { Write-Host $_ }
   throw "Working tree is not clean. Stop here so existing work is not overwritten."
 }
 
@@ -144,7 +148,9 @@ git add mobile/app.json mobile/eas.json mobile/package.json package-lock.json
 git diff --cached --check
 Assert-LastExit 'staged diff check'
 
-if ((git diff --cached --name-only).Trim()) {
+$stagedFiles = @(git diff --cached --name-only)
+if ($LASTEXITCODE -ne 0) { throw "git diff --cached --name-only failed with exit code $LASTEXITCODE" }
+if ($stagedFiles.Count -gt 0) {
   git commit -m "feat: enable EAS Update for mobile"
   Assert-LastExit 'git commit'
   git push origin main
