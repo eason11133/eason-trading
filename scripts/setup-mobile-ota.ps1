@@ -119,17 +119,37 @@ Remove-Item $tmpJs -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host "=== Validate resolved config ===" -ForegroundColor Cyan
-$resolvedLines = @(& $npxCmd expo config --type public --json)
-Assert-LastExit 'expo config'
-$resolved = $resolvedLines -join [Environment]::NewLine
-$cfg = $resolved | ConvertFrom-Json
-if ($cfg.version -ne '0.3.19') { throw "Resolved version mismatch" }
-if ($cfg.android.package -ne 'com.eason.trading') { throw "Resolved package mismatch" }
-if ([int]$cfg.android.versionCode -ne 323) { throw "Resolved versionCode mismatch" }
-if ($cfg.extra.eas.projectId -ne $projectId) { throw "Resolved projectId mismatch" }
-if ($cfg.updates.url -ne "https://u.expo.dev/$projectId") { throw "Resolved updates.url mismatch" }
-if ($cfg.runtimeVersion.policy -ne 'nativeVersion') { throw "Resolved runtimeVersion policy mismatch" }
-Write-Host "Resolved config OK: runtimeVersion policy=nativeVersion"
+$configCheckScript = @'
+const cp = require('child_process');
+
+const npx = process.argv[2];
+const projectId = process.argv[3];
+
+const raw = cp.execFileSync(npx, ['expo','config','--type','public','--json'], {
+  encoding: 'utf8',
+  windowsHide: true
+});
+const cfg = JSON.parse(raw);
+
+function assert(ok, message) {
+  if (!ok) throw new Error(message);
+}
+
+assert(cfg.version === '0.3.19', 'Resolved version mismatch');
+assert(cfg.android?.package === 'com.eason.trading', 'Resolved package mismatch');
+assert(Number(cfg.android?.versionCode) === 323, 'Resolved versionCode mismatch');
+assert(cfg.extra?.eas?.projectId === projectId, 'Resolved projectId mismatch');
+assert(cfg.updates?.url === 'https://u.expo.dev/' + projectId, 'Resolved updates.url mismatch');
+assert(cfg.runtimeVersion?.policy === 'nativeVersion', 'Resolved runtimeVersion policy mismatch');
+
+process.stdout.write('Resolved config OK: runtimeVersion policy=nativeVersion\n');
+'@
+
+$tmpConfigCheck = Join-Path $env:TEMP 'eason-trading-check-expo-config.cjs'
+[System.IO.File]::WriteAllText($tmpConfigCheck, $configCheckScript, [System.Text.UTF8Encoding]::new($false))
+node $tmpConfigCheck $npxCmd $projectId
+Assert-LastExit 'expo config validation'
+Remove-Item $tmpConfigCheck -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host "=== TypeScript ===" -ForegroundColor Cyan
