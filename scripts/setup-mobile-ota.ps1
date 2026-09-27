@@ -15,6 +15,7 @@ $easIgnore = Join-Path $repoRoot '.easignore'
 $easIgnoreBackup = Join-Path $repoRoot '.easignore.ota-backup'
 $projectId = 'f98e196e-d149-42f8-b7c2-ccb887d60080'
 $expectedVersionCode = 323
+$npxCmd = (Get-Command npx.cmd -ErrorAction Stop).Source
 
 function Assert-LastExit([string]$Step) {
   if ($LASTEXITCODE -ne 0) { throw "$Step failed with exit code $LASTEXITCODE" }
@@ -50,7 +51,7 @@ Write-Host "HEAD: $head"
 Write-Host ""
 Write-Host "=== Install expo-updates with Expo SDK resolver ===" -ForegroundColor Cyan
 Set-Location $mobile
-npx expo install expo-updates
+& $npxCmd expo install expo-updates
 Assert-LastExit 'expo install expo-updates'
 
 Write-Host ""
@@ -97,7 +98,7 @@ Remove-Item $tmpJs -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host "=== Validate resolved config ===" -ForegroundColor Cyan
-$resolved = npx expo config --type public --json
+$resolved = & $npxCmd expo config --type public --json
 Assert-LastExit 'expo config'
 $cfg = $resolved | ConvertFrom-Json
 if ($cfg.version -ne '0.3.19') { throw "Resolved version mismatch" }
@@ -110,12 +111,12 @@ Write-Host "Resolved config OK: runtimeVersion policy=nativeVersion"
 
 Write-Host ""
 Write-Host "=== TypeScript ===" -ForegroundColor Cyan
-npx tsc --noEmit
+& $npxCmd tsc --noEmit
 Assert-LastExit 'TypeScript'
 
 Write-Host ""
 Write-Host "=== Expo Doctor ===" -ForegroundColor Cyan
-npx expo-doctor
+& $npxCmd expo-doctor
 $doctorExit = $LASTEXITCODE
 if ($doctorExit -ne 0) {
   Write-Warning "Expo Doctor reported recommendations. Existing SDK 57 patch-version warnings are allowed only if no new blocking error is shown above."
@@ -130,7 +131,7 @@ Write-Host "=== Android JS export smoke ===" -ForegroundColor Cyan
 $exportDir = Join-Path $env:TEMP 'eason-trading-ota-export'
 Remove-Item $exportDir -Recurse -Force -ErrorAction SilentlyContinue
 Set-Location $mobile
-npx expo export --platform android --output-dir $exportDir
+& $npxCmd expo export --platform android --output-dir $exportDir
 Assert-LastExit 'expo export'
 Remove-Item $exportDir -Recurse -Force -ErrorAction SilentlyContinue
 
@@ -188,12 +189,12 @@ try {
   Write-Host ""
   Write-Host "=== Build Android preview 323 (OTA-capable) ===" -ForegroundColor Cyan
   Set-Location $mobile
-  npx eas build --platform android --profile preview --non-interactive
+  & $npxCmd eas build --platform android --profile preview --non-interactive
   Assert-LastExit 'EAS Build'
 
   Write-Host ""
   Write-Host "=== Publish OTA baseline to preview ===" -ForegroundColor Cyan
-  npx eas update --channel preview --message "Build 323 OTA baseline" --non-interactive
+  & $npxCmd eas update --channel preview --message "Build 323 OTA baseline" --non-interactive
   Assert-LastExit 'EAS Update'
 
   Write-Host ""
