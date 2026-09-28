@@ -181,7 +181,7 @@ Real runtime/user data is intentionally outside the repository. The public tree 
 - device/pairing tokens
 - keystores, private keys, APK/AAB output, and local backups
 
-Tracked numeric portfolio/market values used by tests or the legacy demo seed are synthetic fixtures, not runtime Ledger state. .gitignore, clean-package checks, and release verification guard this boundary.
+Tracked numeric portfolio/market values used by tests or the legacy demo seed are fixture data that production runtime does not load as the authoritative Ledger. .gitignore, clean-package checks, and release verification guard this boundary.
 
 ## Repository map
 
