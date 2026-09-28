@@ -254,7 +254,7 @@ try {
 
   Write-Host ""
   Write-Host "=== Publish OTA baseline to preview ===" -ForegroundColor Cyan
-  & $npxCmd --yes eas-cli@24.3.0 update --channel preview --message "Build 323 OTA baseline" --non-interactive
+  & $npxCmd --yes eas-cli@24.3.0 update --channel preview --environment preview --message "Build 323 OTA baseline" --non-interactive
   Assert-LastExit 'EAS Update'
 
   Write-Host ""
